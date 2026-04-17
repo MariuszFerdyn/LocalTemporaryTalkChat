@@ -94,6 +94,8 @@ zip deploy.zip index.php
 
 If you want to download `index.php` first (example from GitHub raw URL), then zip it:
 
+Use this option if you do not clone the repository.
+
 ```bash
 curl -L "https://raw.githubusercontent.com/<OWNER>/<REPO>/main/index.php" -o index.php
 zip deploy.zip index.php
@@ -118,3 +120,5 @@ az webapp browse --resource-group "$RG" --name "$APP"
 ## License
 
 See [LICENSE](LICENSE) for details.
+
+This project is Vibe Coding.
