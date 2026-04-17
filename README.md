@@ -44,14 +44,21 @@ php -S 127.0.0.1:8080 index.php
 
 The flow below creates a Linux PHP web app and deploys only `index.php`.
 
-### 1) Log in and set defaults
+### 1) Clone repository first
+
+```bash
+git clone https://github.com/MariuszFerdyn/LocalTemporaryTalkChat.git
+cd LocalTemporaryTalkChat
+```
+
+### 2) Log in and set defaults
 
 ```bash
 az login
 az account set --subscription "<SUBSCRIPTION_NAME_OR_ID>"
 ```
 
-### 2) Variables
+### 3) Variables
 
 ```bash
 RG="rg-local-chat"
@@ -60,14 +67,14 @@ PLAN="asp-local-chat"
 APP="local-chat-$RANDOM"
 ```
 
-### 3) Create resource group and app service plan
+### 4) Create resource group and app service plan
 
 ```bash
 az group create --name "$RG" --location "$LOCATION"
 az appservice plan create --name "$PLAN" --resource-group "$RG" --is-linux --sku B1
 ```
 
-### 4) Create PHP web app
+### 5) Create PHP web app
 
 ```bash
 az webapp create \
@@ -77,7 +84,7 @@ az webapp create \
 	--runtime "PHP|8.3"
 ```
 
-### 5) Prepare deployment package (index.php only)
+### 6) Prepare deployment package (index.php only)
 
 If you already have local `index.php`:
 
@@ -92,7 +99,7 @@ curl -L "https://raw.githubusercontent.com/<OWNER>/<REPO>/main/index.php" -o ind
 zip deploy.zip index.php
 ```
 
-### 6) Deploy package
+### 7) Deploy package
 
 ```bash
 az webapp deploy \
@@ -102,7 +109,7 @@ az webapp deploy \
 	--type zip
 ```
 
-### 7) Open app
+### 8) Open app
 
 ```bash
 az webapp browse --resource-group "$RG" --name "$APP"
