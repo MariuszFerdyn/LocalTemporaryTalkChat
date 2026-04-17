@@ -1,47 +1,112 @@
 # Local Temporary Talk Chat
 
-A lightweight, file-based chat application written in PHP — no database, no WebSockets, no complex infrastructure required.
+A lightweight, file-based chat application written in PHP 8 with client-side encryption. No database, no WebSockets, and no external services.
 
 ## Features
 
-- **Runs on any PHP host** — deploy instantly on any PHP-capable environment, including Azure Web App, shared hosting, or a local server.
-- **No database** — all messages are stored in plain files on the server; nothing to install or configure.
-- **Fully private & controlled environment** — you host it, you own the data. No third-party services involved.
-- **No sockets** — the chat works by simply refreshing the page; no persistent connections or special server support needed.
-- **Paste code & images** — supports pasting code snippets and pictures directly with **Ctrl+V**.
-- **Easy to join** — just share a chat name. The chat name can also serve as a secret passphrase, so only people who know it can join.
+- Runs on PHP 8 hosts, including Azure App Service.
+- No database required. Messages are stored as newline-delimited JSON files in `storage/`.
+- No sockets/WebSockets. Chat refreshes automatically every 3 seconds and can be refreshed manually.
+- Supports text messages and pasted images via Ctrl+V.
+- Client-side encryption for both text and images using Web Crypto (AES-GCM).
+- Encryption key is entered in the browser and is never sent to the server.
+- If encryption key is empty, room name is used as fallback encryption key.
+- If a wrong key is used, messages/images cannot be decrypted and an explicit warning is shown.
+- Room name is visually hidden in toolbar and revealed on hover.
+- Your name is required and shown with each message.
 
-## Quick Start
+## Security Model
 
-1. Upload the PHP files to your web host (e.g., an Azure Web App with PHP runtime).
-2. Open the URL in a browser.
-3. Enter a **chat name** (this is also your private room key — keep it secret if you want a private chat).
-4. Start chatting. Share the chat name with anyone you want to invite.
+- The server stores encrypted payloads for message content and images.
+- Encryption/decryption happens in browser JavaScript.
+- The encryption key is not transmitted to backend endpoints.
+- If key is forgotten, existing encrypted messages cannot be recovered.
+- Metadata is still visible to server/storage: room hash, timestamp, sender name, message id.
 
-## How It Works
+## Runtime Storage
 
-- Each chat room is identified by a unique name you choose.
-- Messages are appended to a file on the server — no database required.
-- To receive new messages, simply refresh the page (or let the page auto-refresh).
-- Images and code can be pasted inline using **Ctrl+V**.
+- App auto-creates `storage/` at runtime if missing.
+- You can deploy only `index.php`; no pre-created storage folders are required.
+- Ensure the app process has write permission in app directory so `storage/` can be created and written.
 
-## Requirements
+## Local Run
 
-- PHP 7.4 or later
-- Write permissions on the server for storing chat files
+1. Ensure PHP 8+ is installed.
+2. Run:
 
-## Deployment on Azure Web App
+```bash
+php -S 127.0.0.1:8080 index.php
+```
 
-1. Create an Azure Web App with a PHP runtime stack.
-2. Deploy the application files (e.g., via ZIP deploy, FTP, or GitHub Actions).
-3. Ensure the app has write access to the directory used for storing chat files.
-4. Navigate to the app URL and start chatting.
+3. Open `http://127.0.0.1:8080`.
 
-## Privacy & Security
+## Azure App Service Deployment (Azure CLI, index.php only)
 
-- There is no registration or login — access is controlled entirely by the chat name/secret.
-- Choose a long, random chat name to prevent others from guessing it.
-- All data resides on your own server; nothing is sent to external services.
+The flow below creates a Linux PHP web app and deploys only `index.php`.
+
+### 1) Log in and set defaults
+
+```bash
+az login
+az account set --subscription "<SUBSCRIPTION_NAME_OR_ID>"
+```
+
+### 2) Variables
+
+```bash
+RG="rg-local-chat"
+LOCATION="westeurope"
+PLAN="asp-local-chat"
+APP="local-chat-$RANDOM"
+```
+
+### 3) Create resource group and app service plan
+
+```bash
+az group create --name "$RG" --location "$LOCATION"
+az appservice plan create --name "$PLAN" --resource-group "$RG" --is-linux --sku B1
+```
+
+### 4) Create PHP web app
+
+```bash
+az webapp create \
+	--resource-group "$RG" \
+	--plan "$PLAN" \
+	--name "$APP" \
+	--runtime "PHP|8.3"
+```
+
+### 5) Prepare deployment package (index.php only)
+
+If you already have local `index.php`:
+
+```bash
+zip deploy.zip index.php
+```
+
+If you want to download `index.php` first (example from GitHub raw URL), then zip it:
+
+```bash
+curl -L "https://raw.githubusercontent.com/<OWNER>/<REPO>/main/index.php" -o index.php
+zip deploy.zip index.php
+```
+
+### 6) Deploy package
+
+```bash
+az webapp deploy \
+	--resource-group "$RG" \
+	--name "$APP" \
+	--src-path deploy.zip \
+	--type zip
+```
+
+### 7) Open app
+
+```bash
+az webapp browse --resource-group "$RG" --name "$APP"
+```
 
 ## License
 

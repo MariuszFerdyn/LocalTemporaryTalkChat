@@ -1,0 +1,3 @@
+storage/*.jsonl
+storage/images/*
+!storage/images/.gitkeep
