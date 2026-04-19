@@ -1,0 +1,8 @@
+{
+    "chat.tools.terminal.autoApprove": {
+        "/^php -v && \\[ -f index\\.php \\] && echo \"PHP and index\\.php found\"$/": {
+            "approve": true,
+            "matchCommandLine": true
+        }
+    }
+}
