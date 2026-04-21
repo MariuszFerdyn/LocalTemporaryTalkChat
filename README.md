@@ -8,6 +8,8 @@ A lightweight, file-based chat application written in PHP 8 with **client-side e
 - **No Sockets**: Chat refreshes automatically every 3 seconds—no WebSockets or long-polling overhead.
 - **Encrypted Images**: Paste images via Ctrl+V; they are encrypted before being sent to server.
 - **Encrypted Screen Sharing**: WebRTC screen-share signaling (SDP offers/answers, ICE candidates) is encrypted with the same room key. Clients with a wrong key cannot negotiate or view a screen share.
+- **Markdown Rendering**: Messages (including AI replies) support markdown formatting and are rendered safely in chat.
+- **Shared AI Routing**: Any participant can share one AI profile (AI name, model, API base). Anyone in the room can then request it with `AIName: prompt`, and only the sharing participant's browser executes the API call and posts the reply.
 - File-based storage: Messages stored as newline-delimited JSON files in `storage/`.
 - Runs on PHP 8 hosts, including Azure App Service and GitHub Codespaces.
 - No database required. Encryption/decryption happens in the browser, not on server.
@@ -20,11 +22,34 @@ A lightweight, file-based chat application written in PHP 8 with **client-side e
 
 - The server stores encrypted payloads for message content and images.
 - Screen-share signaling payloads (SDP, ICE) are also encrypted before being relayed through the server.
+- AI-share signaling payloads are encrypted before relay; API keys are kept only in the sharer's browser and are never sent to backend storage.
 - Encryption/decryption happens in browser JavaScript.
 - The encryption key is not transmitted to backend endpoints.
 - If key is forgotten, existing encrypted messages cannot be recovered.
 - A client using the wrong encryption key will not receive chat messages, images, or screen-share signals.
 - Metadata is still visible to server/storage: room hash, timestamp, sender name, message id.
+
+## Shared AI Usage
+
+1. Join a room with the same encryption key as other participants.
+2. Click `Share AI`.
+3. Fill in:
+	- `AI Name` (for example: `CoderBot`)
+	- `Model` (for example: `qwen3-coder-next:q4_K_M`)
+	- `API Base` (for example: `https://.../api`)
+	- `API Key`
+4. Click `Start Sharing This AI`.
+5. Any participant can now send requests in chat using:
+
+```text
+AIName: your prompt here
+```
+
+6. The sharer's browser calls the configured AI endpoint and posts the response back to chat.
+
+Notes:
+- Only the participant who shared that AI profile processes prompts for that AI name.
+- API key is never announced to the room and never stored on the server.
 
 ## Runtime Storage
 

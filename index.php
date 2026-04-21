@@ -79,7 +79,7 @@ if ($action !== null) {
             $toRaw = (string)($payload['to'] ?? '');
             $to    = $toRaw === 'all' ? 'all' : validatePeerId($toRaw);
             $type  = (string)($payload['type'] ?? '');
-            if (!in_array($type, ['screen-available', 'screen-stopped', 'join-request', 'offer', 'answer', 'ice', 'bye'], true)) {
+            if (!in_array($type, ['screen-available', 'screen-stopped', 'join-request', 'offer', 'answer', 'ice', 'bye', 'ai-share', 'ai-unshare'], true)) {
                 throw new RuntimeException('Invalid signal type.');
             }
             $data = (string)($payload['data'] ?? '');
@@ -446,10 +446,44 @@ function fetchSignals(string $room, string $storageDir, string $peerId, int $sin
         }
 
         .text {
-            white-space: pre-wrap;
+            white-space: normal;
             word-wrap: break-word;
             font-family: "Consolas", "Courier New", monospace;
             font-size: .92rem;
+        }
+
+        .text p {
+            margin: 0 0 8px;
+        }
+
+        .text p:last-child {
+            margin-bottom: 0;
+        }
+
+        .text pre {
+            margin: 8px 0;
+            padding: 10px;
+            overflow-x: auto;
+            border-radius: 8px;
+            border: 1px solid #c8bda9;
+            background: #f6efdf;
+        }
+
+        .text code {
+            font-family: "Consolas", "Courier New", monospace;
+            background: #f1e7d3;
+            border-radius: 4px;
+            padding: 1px 4px;
+        }
+
+        .text pre code {
+            background: transparent;
+            padding: 0;
+        }
+
+        .text a {
+            color: #155b45;
+            text-decoration: underline;
         }
 
         .image {
@@ -531,8 +565,56 @@ function fetchSignals(string $room, string $storageDir, string $peerId, int $sin
         #shareScreenBtn:hover  { background: #3d4a9e; }
         #watchScreenBtn  { background: #7a5baf; }
         #watchScreenBtn:hover  { background: #5a3d8e; }
+        #shareAIBtn      { background: #b56e2f; }
+        #shareAIBtn:hover      { background: #8d531f; }
         #stopScreenBtn   { background: #8e2f2f; font-size: .85rem; padding: 6px 10px; }
         #stopScreenBtn:hover   { background: #6e1f1f; }
+
+        .ai-panel {
+            display: none;
+            border: 1px solid var(--border);
+            border-radius: 10px;
+            background: #f4ecdc;
+            padding: 10px;
+            gap: 8px;
+        }
+
+        .ai-panel.visible {
+            display: grid;
+        }
+
+        .ai-panel input {
+            width: 100%;
+            padding: 10px;
+            border-radius: 8px;
+            border: 1px solid var(--border);
+            font-size: .95rem;
+        }
+
+        .ai-panel-actions {
+            display: flex;
+            gap: 8px;
+            flex-wrap: wrap;
+            align-items: center;
+        }
+
+        #saveAIShareBtn {
+            background: #2f7b5f;
+        }
+
+        #cancelAIShareBtn {
+            background: #6e6a61;
+        }
+
+        #cancelAIShareBtn:hover {
+            background: #545149;
+        }
+
+        #aiShareStatus {
+            color: #8e2f2f;
+            font-size: .85rem;
+            min-height: 1.1em;
+        }
 
         .screen-container {
             border-top: 1px solid var(--border);
@@ -587,6 +669,7 @@ function fetchSignals(string $room, string $storageDir, string $peerId, int $sin
                 <div class="toolbar-actions">
                     <button id="shareScreenBtn" type="button">Share Screen</button>
                     <button id="watchScreenBtn" type="button" style="display:none">Watch Screen</button>
+                    <button id="shareAIBtn"     type="button">Share AI</button>
                     <button id="stopScreenBtn"  type="button" style="display:none">Stop Sharing</button>
                     <button id="refreshBtn"     type="button">Refresh Now</button>
                 </div>
@@ -604,8 +687,20 @@ function fetchSignals(string $room, string $storageDir, string $peerId, int $sin
             <section class="composer">
                 <textarea id="messageInput" placeholder="Type a message or paste code. Press Ctrl+V to paste an image."></textarea>
                 <img id="imagePreview" class="preview" alt="Pasted image preview">
+                <section class="ai-panel" id="aiSharePanel">
+                    <input id="aiNameInput" type="text" maxlength="40" placeholder="AI Name (example: CoderBot)">
+                    <input id="aiModelInput" type="text" maxlength="160" placeholder="Model (example: qwen3-coder-next:q4_K_M)">
+                    <input id="aiApiBaseInput" type="url" maxlength="300" placeholder="API Base (example: https://host/api)">
+                    <input id="aiApiKeyInput" type="password" maxlength="400" placeholder="API Key">
+                    <div class="ai-panel-actions">
+                        <button id="saveAIShareBtn" type="button">Start Sharing This AI</button>
+                        <button id="cancelAIShareBtn" type="button">Cancel</button>
+                        <span class="hint">Only AI name, model and API base are announced to the room. API key stays local and encrypted prompts are processed only on your client.</span>
+                    </div>
+                    <div id="aiShareStatus"></div>
+                </section>
                 <div class="composer-actions">
-                    <span class="hint">Auto-refresh every 3s. Ctrl+Enter to send.</span>
+                    <span class="hint">Auto-refresh every 3s. Ctrl+Enter to send. Markdown supported. Use AIName: prompt to request a shared AI.</span>
                     <button id="sendBtn" type="button">Send</button>
                 </div>
                 <div class="status" id="chatStatus"></div>
@@ -667,6 +762,14 @@ function fetchSignals(string $room, string $storageDir, string $peerId, int $sin
             cryptoKey: null,
         };
 
+        const aiState = {
+            providers: {},
+            localShares: {},
+            processingMessageIds: new Set(),
+            processedMessageIds: new Set(),
+            advertiseTimer: null,
+        };
+
         function generatePeerId() {
             const buf = crypto.getRandomValues(new Uint8Array(16));
             buf[6] = (buf[6] & 0x0f) | 0x40;
@@ -705,6 +808,15 @@ function fetchSignals(string $room, string $storageDir, string $peerId, int $sin
         const messageInput = document.getElementById('messageInput');
         const chatStatus = document.getElementById('chatStatus');
         const imagePreview = document.getElementById('imagePreview');
+        const shareAIBtn = document.getElementById('shareAIBtn');
+        const aiSharePanel = document.getElementById('aiSharePanel');
+        const aiNameInput = document.getElementById('aiNameInput');
+        const aiModelInput = document.getElementById('aiModelInput');
+        const aiApiBaseInput = document.getElementById('aiApiBaseInput');
+        const aiApiKeyInput = document.getElementById('aiApiKeyInput');
+        const saveAIShareBtn = document.getElementById('saveAIShareBtn');
+        const cancelAIShareBtn = document.getElementById('cancelAIShareBtn');
+        const aiShareStatus = document.getElementById('aiShareStatus');
 
         const callApi = async (action, payload) => {
             const response = await fetch(`?action=${encodeURIComponent(action)}`, {
@@ -727,6 +839,293 @@ function fetchSignals(string $room, string $storageDir, string $peerId, int $sin
             return d.toLocaleString();
         };
 
+        const escapeHtml = (value) => String(value)
+            .replaceAll('&', '&amp;')
+            .replaceAll('<', '&lt;')
+            .replaceAll('>', '&gt;')
+            .replaceAll('"', '&quot;')
+            .replaceAll("'", '&#39;');
+
+        const renderMarkdown = (raw) => {
+            let text = escapeHtml(raw).replace(/\r\n/g, '\n');
+
+            const fenced = [];
+            text = text.replace(/```([a-zA-Z0-9_-]+)?\n?([\s\S]*?)```/g, (_, lang, code) => {
+                const index = fenced.length;
+                fenced.push(`<pre><code${lang ? ` class="language-${lang}"` : ''}>${code.trimEnd()}</code></pre>`);
+                return `@@FENCED_${index}@@`;
+            });
+
+            text = text.replace(/`([^`\n]+)`/g, '<code>$1</code>');
+            text = text.replace(/\*\*([^*]+)\*\*/g, '<strong>$1</strong>');
+            text = text.replace(/(^|[^*])\*([^*\n]+)\*(?=$|[^*])/g, '$1<em>$2</em>');
+            text = text.replace(/\[([^\]]+)\]\((https?:\/\/[^\s)]+)\)/g, '<a href="$2" target="_blank" rel="noopener noreferrer">$1</a>');
+
+            const blocks = text
+                .split(/\n{2,}/)
+                .map((block) => block.trim())
+                .filter(Boolean)
+                .map((block) => {
+                    if (block.startsWith('@@FENCED_') && block.endsWith('@@')) {
+                        return block;
+                    }
+                    return `<p>${block.replace(/\n/g, '<br>')}</p>`;
+                });
+
+            let html = blocks.join('');
+            html = html.replace(/@@FENCED_(\d+)@@/g, (_, idx) => fenced[Number(idx)] || '');
+            return html || '<p></p>';
+        };
+
+        const normalizeAiName = (name) => name.trim().toLowerCase();
+
+        const normalizeApiBase = (base) => base.trim().replace(/\/+$/, '');
+
+        const isPromptForSharedAi = (text) => {
+            const match = /^([A-Za-z0-9_.-]{1,40})\s*:\s*([\s\S]+)$/.exec(text.trim());
+            if (!match) {
+                return null;
+            }
+            const aiName = match[1].trim();
+            const prompt = match[2].trim();
+            if (!prompt) {
+                return null;
+            }
+            return { aiName, prompt };
+        };
+
+        const setAiShareUi = (isSharing) => {
+            shareAIBtn.textContent = isSharing ? 'Stop AI Share' : 'Share AI';
+            aiNameInput.disabled = isSharing;
+            aiModelInput.disabled = isSharing;
+            aiApiBaseInput.disabled = isSharing;
+            aiApiKeyInput.disabled = isSharing;
+            saveAIShareBtn.textContent = isSharing ? 'AI Is Shared' : 'Start Sharing This AI';
+            saveAIShareBtn.disabled = isSharing;
+        };
+
+        const hasAnyLocalAiShare = () => Object.keys(aiState.localShares).length > 0;
+
+        const startAiAnnounceLoop = () => {
+            clearInterval(aiState.advertiseTimer);
+            aiState.advertiseTimer = setInterval(async () => {
+                if (!state.room || !screenState.peerId) {
+                    return;
+                }
+                const shares = Object.values(aiState.localShares);
+                for (const share of shares) {
+                    await postSignal('ai-share', 'all', {
+                        aiName: share.aiName,
+                        model: share.model,
+                        apiBase: share.apiBase,
+                        sharerName: state.user,
+                    });
+                }
+            }, 20000);
+        };
+
+        const stopAiAnnounceLoop = () => {
+            clearInterval(aiState.advertiseTimer);
+            aiState.advertiseTimer = null;
+        };
+
+        const stopAllLocalAiShares = async () => {
+            const shares = Object.values(aiState.localShares);
+            aiState.localShares = {};
+            setAiShareUi(false);
+            for (const share of shares) {
+                await postSignal('ai-unshare', 'all', { aiName: share.aiName });
+            }
+            stopAiAnnounceLoop();
+        };
+
+        const extractAiReplyText = (responseJson) => {
+            const fromChoices = responseJson?.choices?.[0];
+            const messageContent = fromChoices?.message?.content;
+            if (typeof messageContent === 'string' && messageContent.trim()) {
+                return messageContent.trim();
+            }
+            if (Array.isArray(messageContent)) {
+                const combined = messageContent
+                    .map((p) => (typeof p?.text === 'string' ? p.text : ''))
+                    .join('\n')
+                    .trim();
+                if (combined) {
+                    return combined;
+                }
+            }
+            const textChoice = fromChoices?.text;
+            if (typeof textChoice === 'string' && textChoice.trim()) {
+                return textChoice.trim();
+            }
+            if (typeof responseJson?.message?.content === 'string' && responseJson.message.content.trim()) {
+                return responseJson.message.content.trim();
+            }
+            if (typeof responseJson?.response === 'string' && responseJson.response.trim()) {
+                return responseJson.response.trim();
+            }
+            if (typeof responseJson?.output_text === 'string' && responseJson.output_text.trim()) {
+                return responseJson.output_text.trim();
+            }
+            throw new Error('AI API returned no usable text response.');
+        };
+
+        const fetchAiCompletion = async (share, prompt) => {
+            const base = normalizeApiBase(share.apiBase);
+            const endpointCandidates = [
+                `${base}/chat/completions`,
+                `${base}/v1/chat/completions`,
+                `${base}/openai/v1/chat/completions`,
+            ];
+            const seen = new Set();
+            const uniqueEndpoints = endpointCandidates.filter((url) => {
+                if (seen.has(url)) {
+                    return false;
+                }
+                seen.add(url);
+                return true;
+            });
+
+            let lastError = 'Unknown AI API error';
+            for (const endpoint of uniqueEndpoints) {
+                const controller = new AbortController();
+                const timeout = setTimeout(() => controller.abort(), 90000);
+                try {
+                    const headers = { 'Content-Type': 'application/json' };
+                    if (share.apiKey) {
+                        headers.Authorization = `Bearer ${share.apiKey}`;
+                        headers['X-API-Key'] = share.apiKey;
+                    }
+                    const response = await fetch(endpoint, {
+                        method: 'POST',
+                        headers,
+                        signal: controller.signal,
+                        body: JSON.stringify({
+                            model: share.model,
+                            messages: [
+                                {
+                                    role: 'system',
+                                    content: `You are ${share.aiName}. Keep responses concise unless asked for detail.`,
+                                },
+                                {
+                                    role: 'user',
+                                    content: prompt,
+                                },
+                            ],
+                            stream: false,
+                        }),
+                    });
+
+                    const textBody = await response.text();
+                    if (!response.ok) {
+                        lastError = `HTTP ${response.status} at ${endpoint}: ${textBody.slice(0, 220)}`;
+                        continue;
+                    }
+
+                    let json;
+                    try {
+                        json = JSON.parse(textBody);
+                    } catch {
+                        throw new Error('AI API returned non-JSON response.');
+                    }
+
+                    return extractAiReplyText(json);
+                } catch (err) {
+                    lastError = `${endpoint} failed: ${err.message}`;
+                } finally {
+                    clearTimeout(timeout);
+                }
+            }
+
+            throw new Error(lastError);
+        };
+
+        const sendAiAnswer = async (replyText, aiName, sourceMessageId) => {
+            const output = `${aiName} reply to #${sourceMessageId}:\n${replyText}`;
+            const encText = await encryptText(state.cryptoKey, output);
+            const data = await callApi('send', {
+                room: state.room,
+                user: `${aiName} via ${state.user}`,
+                text: encText,
+                encryptedImage: '',
+            });
+            await appendMessage(data.message);
+            state.sinceId = Math.max(state.sinceId, Number(data.message.id || 0));
+        };
+
+        const sendSystemChatMessage = async (plainText) => {
+            const encText = await encryptText(state.cryptoKey, plainText);
+            const data = await callApi('send', {
+                room: state.room,
+                user: 'System',
+                text: encText,
+                encryptedImage: '',
+            });
+            await appendMessage(data.message);
+            state.sinceId = Math.max(state.sinceId, Number(data.message.id || 0));
+        };
+
+        const maybeProcessAiPrompt = async (message) => {
+            if (!message?.text || !state.cryptoKey) {
+                return;
+            }
+            if (aiState.processedMessageIds.has(message.id) || aiState.processingMessageIds.has(message.id)) {
+                return;
+            }
+
+            let plainText = '';
+            try {
+                plainText = await decryptText(state.cryptoKey, message.text);
+            } catch {
+                return;
+            }
+
+            const parsed = isPromptForSharedAi(plainText);
+            if (!parsed) {
+                aiState.processedMessageIds.add(message.id);
+                return;
+            }
+
+            const aiKey = normalizeAiName(parsed.aiName);
+            const provider = aiState.providers[aiKey];
+            const localShare = aiState.localShares[aiKey];
+            if (!provider || !localShare) {
+                aiState.processedMessageIds.add(message.id);
+                return;
+            }
+
+            const msgTs = Date.parse(String(message.timestamp || ''));
+            if (!Number.isNaN(msgTs) && msgTs < localShare.startedAt) {
+                aiState.processedMessageIds.add(message.id);
+                return;
+            }
+
+            if (provider.sharerPeerId !== screenState.peerId || localShare.sharerPeerId !== screenState.peerId) {
+                aiState.processedMessageIds.add(message.id);
+                return;
+            }
+
+            aiState.processingMessageIds.add(message.id);
+            try {
+                const answer = await fetchAiCompletion(localShare, parsed.prompt);
+                await sendAiAnswer(answer, localShare.aiName, message.id);
+            } catch (err) {
+                const fallback = `${localShare.aiName} error for #${message.id}: ${err.message}`;
+                const encText = await encryptText(state.cryptoKey, fallback);
+                const data = await callApi('send', {
+                    room: state.room,
+                    user: `${localShare.aiName} via ${state.user}`,
+                    text: encText,
+                    encryptedImage: '',
+                });
+                await appendMessage(data.message);
+                state.sinceId = Math.max(state.sinceId, Number(data.message.id || 0));
+            } finally {
+                aiState.processingMessageIds.delete(message.id);
+                aiState.processedMessageIds.add(message.id);
+            }
+        };
+
         const appendMessage = async (message) => {
             const item = document.createElement('article');
             item.className = 'msg';
@@ -740,7 +1139,7 @@ function fetchSignals(string $room, string $storageDir, string $peerId, int $sin
                 const text = document.createElement('div');
                 text.className = 'text';
                 try {
-                    text.textContent = await decryptText(state.cryptoKey, message.text);
+                    text.innerHTML = renderMarkdown(await decryptText(state.cryptoKey, message.text));
                 } catch {
                     text.textContent = '[could not decrypt message - probably wrong encryption key]';
                     text.style.color = '#8e2f2f';
@@ -776,6 +1175,7 @@ function fetchSignals(string $room, string $storageDir, string $peerId, int $sin
 
                 for (const message of data.messages) {
                     await appendMessage(message);
+                    await maybeProcessAiPrompt(message);
                     state.sinceId = Math.max(state.sinceId, Number(message.id || 0));
                 }
                 chatStatus.textContent = '';
@@ -846,6 +1246,14 @@ function fetchSignals(string $room, string $storageDir, string $peerId, int $sin
             state.room = room;
             state.user = user;
             state.sinceId = 0;
+            aiState.providers = {};
+            aiState.localShares = {};
+            aiState.processedMessageIds.clear();
+            aiState.processingMessageIds.clear();
+            stopAiAnnounceLoop();
+            aiShareStatus.textContent = '';
+            aiSharePanel.classList.remove('visible');
+            setAiShareUi(false);
 
             roomName.textContent = room;
             userName.textContent = user;
@@ -902,6 +1310,78 @@ function fetchSignals(string $room, string $storageDir, string $peerId, int $sin
                     return;
                 }
             }
+        });
+
+        shareAIBtn.addEventListener('click', async () => {
+            if (hasAnyLocalAiShare()) {
+                await stopAllLocalAiShares();
+                aiShareStatus.textContent = 'AI sharing stopped.';
+                return;
+            }
+            aiSharePanel.classList.toggle('visible');
+            if (aiSharePanel.classList.contains('visible')) {
+                aiNameInput.focus();
+            }
+        });
+
+        cancelAIShareBtn.addEventListener('click', () => {
+            aiSharePanel.classList.remove('visible');
+            aiShareStatus.textContent = '';
+        });
+
+        saveAIShareBtn.addEventListener('click', async () => {
+            if (!state.room || !screenState.peerId) {
+                aiShareStatus.textContent = 'Join a room first.';
+                return;
+            }
+
+            const aiName = aiNameInput.value.trim();
+            const model = aiModelInput.value.trim();
+            const apiBase = normalizeApiBase(aiApiBaseInput.value);
+            const apiKey = aiApiKeyInput.value;
+
+            if (!/^[A-Za-z0-9_.-]{1,40}$/.test(aiName)) {
+                aiShareStatus.textContent = 'AI Name must use only letters, numbers, dot, underscore or dash.';
+                return;
+            }
+            if (!model) {
+                aiShareStatus.textContent = 'Model is required.';
+                return;
+            }
+            if (!apiBase || !/^https?:\/\//i.test(apiBase)) {
+                aiShareStatus.textContent = 'API Base must be a valid http(s) URL.';
+                return;
+            }
+
+            const aiKey = normalizeAiName(aiName);
+            aiState.localShares[aiKey] = {
+                aiName,
+                model,
+                apiBase,
+                apiKey,
+                sharerPeerId: screenState.peerId,
+                startedAt: Date.now(),
+            };
+            aiState.providers[aiKey] = {
+                aiName,
+                model,
+                apiBase,
+                sharerPeerId: screenState.peerId,
+                sharerName: state.user,
+                at: Date.now(),
+            };
+
+            setAiShareUi(true);
+            aiSharePanel.classList.remove('visible');
+            aiShareStatus.textContent = '';
+            await postSignal('ai-share', 'all', {
+                aiName,
+                model,
+                apiBase,
+                sharerName: state.user,
+            });
+            startAiAnnounceLoop();
+            await sendSystemChatMessage(`🤖 ${state.user} shared AI "${aiName}". Ask with: ${aiName}: your prompt`);
         });
 
         // ── Screen Sharing via WebRTC (signaling relayed through HTTP polling) ──
@@ -1121,6 +1601,38 @@ function fetchSignals(string $room, string $storageDir, string $peerId, int $sin
                         await screenState.peerConns[from].addIceCandidate(candidate).catch(console.warn);
                     } else if (screenState.isWatching && screenState.viewerConn) {
                         await screenState.viewerConn.addIceCandidate(candidate).catch(console.warn);
+                    }
+                    break;
+                }
+
+                case 'ai-share': {
+                    const aiName = (parsed.aiName || '').trim();
+                    const model = (parsed.model || '').trim();
+                    const apiBase = normalizeApiBase((parsed.apiBase || '').trim());
+                    if (!/^[A-Za-z0-9_.-]{1,40}$/.test(aiName) || !model || !apiBase) {
+                        break;
+                    }
+                    const key = normalizeAiName(aiName);
+                    aiState.providers[key] = {
+                        aiName,
+                        model,
+                        apiBase,
+                        sharerPeerId: from,
+                        sharerName: parsed.sharerName || 'Someone',
+                        at: Date.now(),
+                    };
+                    break;
+                }
+
+                case 'ai-unshare': {
+                    const aiName = (parsed.aiName || '').trim();
+                    if (!aiName) {
+                        break;
+                    }
+                    const key = normalizeAiName(aiName);
+                    const provider = aiState.providers[key];
+                    if (provider && provider.sharerPeerId === from) {
+                        delete aiState.providers[key];
                     }
                     break;
                 }
