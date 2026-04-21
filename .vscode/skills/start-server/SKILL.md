@@ -10,23 +10,24 @@
 ## What this does
 
 Starts a PHP built-in development server on `127.0.0.1:8080` that serves the chat application. The server:
+Starts a PHP built-in development server on `0.0.0.0:8081` that serves the chat application. The server:
 - Handles HTTP requests for the chat interface and API endpoints
 - Stores encrypted messages in the `storage/` directory
 - Does NOT use databases, WebSockets, or external services
-- Supports both locally encrypted text messages and images (encrypted client-side)
+- Supports locally encrypted text messages, images, and screen-share signaling (all encrypted client-side with the room key)
 
 ## How to start the server
 
 ### Option 1: Direct Command
 ```bash
-php -S 127.0.0.1:8080 index.php
+php -S 0.0.0.0:8081 -t /workspaces/LocalTemporaryTalkChat /workspaces/LocalTemporaryTalkChat/index.php
 ```
 
 ### Option 2: VS Code Task (Codespaces)
 1. Press `Ctrl+Shift+P` (or `Cmd+Shift+P` on Mac)
 2. Select "Run Task"
 3. Choose "Start PHP Server"
-4. The terminal will show: `Listening on http://127.0.0.1:8080`
+4. The terminal will show: `Listening on http://0.0.0.0:8081`
 
 ### Option 3: VS Code Task Terminal
 In any integrated terminal in VS Code, run:
@@ -37,11 +38,20 @@ npm run start
 
 ## After starting
 
-1. Open `http://127.0.0.1:8080` in your browser
-2. Enter a room name (e.g., "MyChat")
-3. Enter your name
-4. (Optional) Set an encryption key for added security
-5. Start chatting—all messages and images are encrypted end-to-end!
+### Local
+1. Open `http://127.0.0.1:8081` in your browser.
+
+### GitHub Codespaces
+1. Make port 8081 **public** so the forwarded URL is reachable:
+  - Open the **Ports** tab in VS Code, right-click port **8081** → **Port Visibility** → **Public**
+  - Or run: `gh codespace ports visibility 8081:public -c $CODESPACE_NAME`
+2. Open the forwarded URL shown in the Ports tab (e.g. `https://<name>-8081.app.github.dev`).
+
+### Both environments
+1. Enter a room name (e.g., "MyChat")
+2. Enter your name (or leave empty for anonymous alias)
+3. (Optional) Set an encryption key for added security
+4. Start chatting—all messages and images are encrypted end-to-end!
 
 ## Stopping the server
 
@@ -49,9 +59,10 @@ Press `Ctrl+C` in the terminal where the server is running.
 
 ## Troubleshooting
 
-- **Port 8080 already in use?** Change the command to use another port:
+- **Port 8081 already in use?** Restart the server task or kill the process and run:
   ```bash
-  php -S 127.0.0.1:8081 index.php
+  fuser -k 8081/tcp 2>/dev/null || true
+  php -S 0.0.0.0:8081 -t /workspaces/LocalTemporaryTalkChat /workspaces/LocalTemporaryTalkChat/index.php
   ```
 - **Permission denied?** Ensure the app process has write permissions in the app directory for creating `storage/`
 - **"Module not found"?** Ensure PHP 8+ is installed: `php -v`

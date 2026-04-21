@@ -2,13 +2,41 @@
     "version": "2.0.0",
     "tasks": [
         {
+            "label": "Restart PHP Server",
+            "type": "shell",
+            "command": "fuser -k 8081/tcp 2>/dev/null; sleep 0.5; php -S 0.0.0.0:8081 -t \"${workspaceFolder}\" \"${workspaceFolder}/index.php\"",
+            "presentation": {
+                "echo": true,
+                "reveal": "always",
+                "focus": true,
+                "panel": "shared"
+            },
+            "options": {
+                "cwd": "${workspaceFolder}"
+            },
+            "isBackground": true,
+            "problemMatcher": {
+                "pattern": {
+                    "regexp": "^.*Listening on http://0\\.0\\.0\\.0:8081.*$",
+                    "file": 1
+                },
+                "background": {
+                    "activeOnStart": true,
+                    "beginsPattern": "^.*Listening on.*$",
+                    "endsPattern": "^.*$"
+                }
+            }
+        },
+        {
             "label": "Start PHP Server",
             "type": "shell",
             "command": "php",
             "args": [
                 "-S",
-                "127.0.0.1:8080",
-                "index.php"
+                "0.0.0.0:8081",
+                "-t",
+                "${workspaceFolder}",
+                "${workspaceFolder}/index.php"
             ],
             "presentation": {
                 "echo": true,
@@ -16,10 +44,13 @@
                 "focus": true,
                 "panel": "shared"
             },
+            "options": {
+                "cwd": "${workspaceFolder}"
+            },
             "isBackground": true,
             "problemMatcher": {
                 "pattern": {
-                    "regexp": "^.*Listening on http://127\\.0\\.0\\.1:8080.*$",
+                    "regexp": "^.*Listening on http://0\\.0\\.0\\.0:8081.*$",
                     "file": 1
                 },
                 "background": {
@@ -30,6 +61,29 @@
             },
             "runOptions": {
                 "runOn": "default"
+            }
+        },
+        {
+            "label": "Restart PHP Server Internet",
+            "type": "shell",
+            "command": "cd \"${workspaceFolder}\" && fuser -k 8081/tcp 2>/dev/null; sleep 0.5; php -S 0.0.0.0:8081 -t \"${workspaceFolder}\" \"${workspaceFolder}/index.php\"",
+            "presentation": {
+                "echo": true,
+                "reveal": "always",
+                "focus": true,
+                "panel": "shared"
+            },
+            "isBackground": true,
+            "problemMatcher": {
+                "pattern": {
+                    "regexp": "^.*(Development Server|Listening on).*$",
+                    "file": 1
+                },
+                "background": {
+                    "activeOnStart": true,
+                    "beginsPattern": "^.*$",
+                    "endsPattern": "^.*$"
+                }
             }
         }
     ]

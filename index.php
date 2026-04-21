@@ -13,6 +13,8 @@ const MAX_ROOM_LENGTH = 120;
 const MAX_USER_LENGTH = 40;
 const MAX_TEXT_LENGTH = 8000;           // encrypted text is larger than plaintext
 const MAX_ENCRYPTED_IMAGE = 4_000_000; // ~3 MB plaintext image after base64+encryption overhead
+const MAX_SIGNAL_DATA    = 32768;       // enough for SDP offers/answers and ICE candidates
+const SIGNAL_TTL         = 120;         // seconds; stale signals are ignored on read
 
 $storageDir = __DIR__ . '/storage';
 
@@ -72,6 +74,37 @@ if ($action !== null) {
             exit;
         }
 
+        if ($action === 'signal') {
+            $from  = validatePeerId((string)($payload['from'] ?? ''));
+            $toRaw = (string)($payload['to'] ?? '');
+            $to    = $toRaw === 'all' ? 'all' : validatePeerId($toRaw);
+            $type  = (string)($payload['type'] ?? '');
+            if (!in_array($type, ['screen-available', 'screen-stopped', 'join-request', 'offer', 'answer', 'ice', 'bye'], true)) {
+                throw new RuntimeException('Invalid signal type.');
+            }
+            $data = (string)($payload['data'] ?? '');
+            if (strlen($data) > MAX_SIGNAL_DATA) {
+                throw new RuntimeException('Signal payload too large.');
+            }
+            appendSignal($room, $storageDir, [
+                'from' => $from,
+                'to'   => $to,
+                'type' => $type,
+                'data' => $data,
+                'ts'   => time(),
+            ]);
+            echo json_encode(['ok' => true]);
+            exit;
+        }
+
+        if ($action === 'fetch-signals') {
+            $peerId  = validatePeerId((string)($payload['peerId'] ?? ''));
+            $sinceId = max(0, (int)($payload['sinceId'] ?? 0));
+            $signals = fetchSignals($room, $storageDir, $peerId, $sinceId);
+            echo json_encode(['ok' => true, 'signals' => $signals]);
+            exit;
+        }
+
         http_response_code(400);
         echo json_encode(['ok' => false, 'error' => 'Unknown action']);
     } catch (Throwable $e) {
@@ -97,7 +130,7 @@ function normalizeUser(string $user): string
 {
     $user = trim($user);
     if ($user === '') {
-        throw new RuntimeException('Your name is required.');
+        $user = 'anon-' . bin2hex(random_bytes(3));
     }
     if (mb_strlen($user) > MAX_USER_LENGTH) {
         $user = mb_substr($user, 0, MAX_USER_LENGTH);
@@ -181,6 +214,88 @@ function appendMessage(string $room, string $storageDir, array $message): array
         flock($handle, LOCK_UN);
 
         return $message;
+    } finally {
+        fclose($handle);
+    }
+}
+
+function validatePeerId(string $id): string
+{
+    if (!preg_match('/^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/', $id)) {
+        throw new RuntimeException('Invalid peer ID format.');
+    }
+    return $id;
+}
+
+function signalFilePath(string $room, string $storageDir): string
+{
+    return $storageDir . '/' . roomHash($room) . '.sig.jsonl';
+}
+
+function appendSignal(string $room, string $storageDir, array $signal): void
+{
+    $path   = signalFilePath($room, $storageDir);
+    $handle = fopen($path, 'c+b');
+    if (!$handle) {
+        throw new RuntimeException('Unable to open signal file for writing.');
+    }
+    try {
+        if (!flock($handle, LOCK_EX)) {
+            throw new RuntimeException('Unable to lock signal file.');
+        }
+        rewind($handle);
+        $lastId = 0;
+        while (($line = fgets($handle)) !== false) {
+            $decoded = json_decode(trim($line), true);
+            if (is_array($decoded)) {
+                $lastId = max($lastId, (int)($decoded['id'] ?? 0));
+            }
+        }
+        $signal['id'] = $lastId + 1;
+        fseek($handle, 0, SEEK_END);
+        fwrite($handle, json_encode($signal, JSON_UNESCAPED_SLASHES) . PHP_EOL);
+        fflush($handle);
+        flock($handle, LOCK_UN);
+    } finally {
+        fclose($handle);
+    }
+}
+
+function fetchSignals(string $room, string $storageDir, string $peerId, int $sinceId): array
+{
+    $path = signalFilePath($room, $storageDir);
+    if (!file_exists($path)) {
+        return [];
+    }
+    $handle = fopen($path, 'rb');
+    if (!$handle) {
+        return [];
+    }
+    try {
+        flock($handle, LOCK_SH);
+        $signals = [];
+        $cutoff  = time() - SIGNAL_TTL;
+        while (($line = fgets($handle)) !== false) {
+            $line = trim($line);
+            if ($line === '') {
+                continue;
+            }
+            $sig = json_decode($line, true);
+            if (!is_array($sig)) {
+                continue;
+            }
+            if ((int)($sig['id'] ?? 0) <= $sinceId) {
+                continue;
+            }
+            if ((int)($sig['ts'] ?? 0) < $cutoff) {
+                continue;
+            }
+            if ($sig['to'] === $peerId || $sig['to'] === 'all') {
+                $signals[] = $sig;
+            }
+        }
+        flock($handle, LOCK_UN);
+        return $signals;
     } finally {
         fclose($handle);
     }
@@ -403,6 +518,46 @@ function appendMessage(string $room, string $storageDir, array $message): array
             .toolbar { flex-direction: column; align-items: flex-start; }
             .chat { min-height: 75vh; }
         }
+
+        /* ── Screen Sharing ── */
+        .toolbar-actions {
+            display: flex;
+            gap: 8px;
+            align-items: center;
+            flex-wrap: wrap;
+        }
+
+        #shareScreenBtn  { background: #5b6abf; }
+        #shareScreenBtn:hover  { background: #3d4a9e; }
+        #watchScreenBtn  { background: #7a5baf; }
+        #watchScreenBtn:hover  { background: #5a3d8e; }
+        #stopScreenBtn   { background: #8e2f2f; font-size: .85rem; padding: 6px 10px; }
+        #stopScreenBtn:hover   { background: #6e1f1f; }
+
+        .screen-container {
+            border-top: 1px solid var(--border);
+            border-bottom: 1px solid var(--border);
+            padding: 10px 16px;
+            background: #0d1117;
+        }
+
+        .screen-header {
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            margin-bottom: 8px;
+            color: #c9d1d9;
+            font-size: .88rem;
+        }
+
+        #screenVideo {
+            width: 100%;
+            max-height: 420px;
+            background: #000;
+            border-radius: 8px;
+            display: block;
+            object-fit: contain;
+        }
     </style>
 </head>
 <body>
@@ -415,7 +570,7 @@ function appendMessage(string $room, string $storageDir, array $message): array
         <section class="join" id="joinView">
             <input id="roomInput" type="text" maxlength="120" placeholder="Channel name">
             <input id="channelKeyInput" type="password" maxlength="200" placeholder="Encryption key (optional)">
-            <input id="userInput" type="text" maxlength="40" placeholder="Your name" required>
+            <input id="userInput" type="text" maxlength="40" placeholder="Name (optional, leave blank for anonymous)">
             <button id="joinBtn" type="button">Join Chat</button>
             <div class="hint">Use the same channel name and encryption key on all clients to read the same chat.</div>
             <div class="hint">If encryption key is empty, the room name is used as the encryption key.</div>
@@ -427,12 +582,24 @@ function appendMessage(string $room, string $storageDir, array $message): array
         <section class="chat" id="chatView">
             <header class="toolbar">
                 <div>
-                    Room: <strong id="roomName" class="room-secret" title="Hover to reveal room name" tabindex="0"></strong> · You: <strong id="userName"></strong>
+                    Room: <strong id="roomName" class="room-secret" title="Hover to reveal room name" tabindex="0"></strong> &middot; You: <strong id="userName"></strong>
                 </div>
-                <button id="refreshBtn" type="button">Refresh Now</button>
+                <div class="toolbar-actions">
+                    <button id="shareScreenBtn" type="button">Share Screen</button>
+                    <button id="watchScreenBtn" type="button" style="display:none">Watch Screen</button>
+                    <button id="stopScreenBtn"  type="button" style="display:none">Stop Sharing</button>
+                    <button id="refreshBtn"     type="button">Refresh Now</button>
+                </div>
             </header>
 
             <section class="messages" id="messages"></section>
+
+            <section id="screenContainer" class="screen-container" style="display:none">
+                <div class="screen-header">
+                    <span id="screenLabel">Screen Share</span>
+                </div>
+                <video id="screenVideo" autoplay playsinline muted></video>
+            </section>
 
             <section class="composer">
                 <textarea id="messageInput" placeholder="Type a message or paste code. Press Ctrl+V to paste an image."></textarea>
@@ -498,6 +665,28 @@ function appendMessage(string $room, string $storageDir, array $message): array
             pendingImage: '',
             pollTimer: null,
             cryptoKey: null,
+        };
+
+        function generatePeerId() {
+            const buf = crypto.getRandomValues(new Uint8Array(16));
+            buf[6] = (buf[6] & 0x0f) | 0x40;
+            buf[8] = (buf[8] & 0x3f) | 0x80;
+            const hex = Array.from(buf, b => b.toString(16).padStart(2, '0')).join('');
+            return `${hex.slice(0,8)}-${hex.slice(8,12)}-${hex.slice(12,16)}-${hex.slice(16,20)}-${hex.slice(20)}`;
+        }
+
+        const screenState = {
+            peerId:         null,
+            isSharing:      false,
+            isWatching:     false,
+            stream:         null,
+            sharerPeerId:   null,
+            sharerName:     null,
+            peerConns:      {},
+            viewerConn:     null,
+            lastSignalId:   0,
+            keepAliveTimer: null,
+            warnedWrongKey: false,
         };
 
         const joinView = document.getElementById('joinView');
@@ -637,18 +826,12 @@ function appendMessage(string $room, string $storageDir, array $message): array
         joinBtn.addEventListener('click', async () => {
             const room = roomInput.value.trim();
             const channelKey = channelKeyInput.value;
-            const user = userInput.value.trim();
+            const user = userInput.value.trim() || `anon-${crypto.randomUUID().slice(0, 8)}`;
 
             if (!room) {
                 joinStatus.textContent = 'Room name is required.';
                 return;
             }
-            if (!user) {
-                joinStatus.textContent = 'Your name is required.';
-                userInput.focus();
-                return;
-            }
-
             joinBtn.disabled = true;
             joinStatus.textContent = 'Deriving encryption key…';
             try {
@@ -673,7 +856,13 @@ function appendMessage(string $room, string $storageDir, array $message): array
             await refreshMessages();
 
             clearInterval(state.pollTimer);
-            state.pollTimer = setInterval(refreshMessages, 3000);
+            screenState.peerId       = generatePeerId();
+            screenState.lastSignalId = 0;
+            state.pollTimer = setInterval(async () => {
+                await refreshMessages();
+                await fetchAndHandleSignals();
+            }, 3000);
+            await fetchAndHandleSignals();
             messageInput.focus();
         });
 
@@ -714,6 +903,305 @@ function appendMessage(string $room, string $storageDir, array $message): array
                 }
             }
         });
+
+        // ── Screen Sharing via WebRTC (signaling relayed through HTTP polling) ──
+        const RTC_CONFIG = {
+            iceServers: [
+                { urls: 'stun:stun.l.google.com:19302' },
+                { urls: 'stun:stun1.l.google.com:19302' },
+            ],
+        };
+
+        const screenContainer = document.getElementById('screenContainer');
+        const screenVideo     = document.getElementById('screenVideo');
+        const screenLabel     = document.getElementById('screenLabel');
+        const shareScreenBtn  = document.getElementById('shareScreenBtn');
+        const watchScreenBtn  = document.getElementById('watchScreenBtn');
+        const stopScreenBtn   = document.getElementById('stopScreenBtn');
+
+        const postSignal = async (type, to, data) => {
+            try {
+                const plainData = typeof data === 'string' ? data : JSON.stringify(data);
+                const encryptedData = await encryptText(state.cryptoKey, plainData);
+                await callApi('signal', {
+                    room: state.room,
+                    from: screenState.peerId,
+                    to,
+                    type,
+                    data: encryptedData,
+                });
+            } catch (err) {
+                console.warn('Signal send failed:', err.message);
+            }
+        };
+
+        const showSystemNotice = (html) => {
+            const notice = document.createElement('article');
+            notice.className = 'msg';
+            notice.innerHTML = html;
+            messagesEl.appendChild(notice);
+            messagesEl.scrollTop = messagesEl.scrollHeight;
+        };
+
+        const closeViewerConn = () => {
+            if (screenState.viewerConn) {
+                screenState.viewerConn.close();
+                screenState.viewerConn = null;
+            }
+            screenState.isWatching = false;
+            screenVideo.srcObject = null;
+            screenContainer.style.display = 'none';
+            watchScreenBtn.textContent = 'Watch Screen';
+            watchScreenBtn.disabled = false;
+        };
+
+        const closeSharerConns = () => {
+            clearInterval(screenState.keepAliveTimer);
+            screenState.keepAliveTimer = null;
+            for (const pc of Object.values(screenState.peerConns)) {
+                try { pc.close(); } catch (_) {}
+            }
+            screenState.peerConns = {};
+            if (screenState.stream) {
+                screenState.stream.getTracks().forEach(t => t.stop());
+                screenState.stream = null;
+            }
+            screenState.isSharing = false;
+            screenVideo.srcObject = null;
+            screenContainer.style.display = 'none';
+            shareScreenBtn.textContent = 'Share Screen';
+            shareScreenBtn.disabled = false;
+            stopScreenBtn.style.display = 'none';
+        };
+
+        // Sharer creates a dedicated RTCPeerConnection for each viewer
+        const createOfferForViewer = async (viewerPeerId) => {
+            if (screenState.peerConns[viewerPeerId]) return;
+            if (!screenState.stream) return;
+
+            const pc = new RTCPeerConnection(RTC_CONFIG);
+            screenState.peerConns[viewerPeerId] = pc;
+
+            screenState.stream.getTracks().forEach(track => {
+                pc.addTrack(track, screenState.stream);
+            });
+
+            pc.onicecandidate = async ({ candidate }) => {
+                if (candidate) {
+                    await postSignal('ice', viewerPeerId, candidate.toJSON());
+                }
+            };
+
+            pc.onconnectionstatechange = () => {
+                if (['disconnected', 'failed', 'closed'].includes(pc.connectionState)) {
+                    try { pc.close(); } catch (_) {}
+                    delete screenState.peerConns[viewerPeerId];
+                }
+            };
+
+            try {
+                const offer = await pc.createOffer();
+                await pc.setLocalDescription(offer);
+                await postSignal('offer', viewerPeerId, { type: offer.type, sdp: offer.sdp });
+            } catch (err) {
+                console.warn('Failed to create offer:', err);
+                delete screenState.peerConns[viewerPeerId];
+            }
+        };
+
+        const handleSignal = async (sig) => {
+            const { from, type, data } = sig;
+            let parsed = {};
+            if (data) {
+                try {
+                    const decrypted = await decryptText(state.cryptoKey, data);
+                    parsed = decrypted ? JSON.parse(decrypted) : {};
+                    screenState.warnedWrongKey = false;
+                } catch (_) {
+                    if (!screenState.warnedWrongKey) {
+                        chatStatus.textContent = 'Screen-share signal ignored: wrong encryption key for this room.';
+                        screenState.warnedWrongKey = true;
+                    }
+                    return;
+                }
+            }
+
+            switch (type) {
+                case 'screen-available': {
+                    if (screenState.isSharing) break;
+                    const isNewSharer = from !== screenState.sharerPeerId;
+                    screenState.sharerPeerId = from;
+                    screenState.sharerName   = parsed.name || 'Someone';
+                    watchScreenBtn.style.display = '';
+                    watchScreenBtn.textContent = `Watch ${screenState.sharerName}'s Screen`;
+                    if (isNewSharer) {
+                        showSystemNotice(`<div class="meta">System</div><div class="text" style="color:var(--accent)">📺 ${screenState.sharerName} started sharing their screen — click the Watch button in the toolbar to view.</div>`);
+                    }
+                    break;
+                }
+
+                case 'screen-stopped': {
+                    if (from !== screenState.sharerPeerId) break;
+                    const stoppedName = screenState.sharerName || 'Someone';
+                    watchScreenBtn.style.display = 'none';
+                    watchScreenBtn.textContent = 'Watch Screen';
+                    screenState.sharerPeerId = null;
+                    screenState.sharerName   = null;
+                    closeViewerConn();
+                    showSystemNotice(`<div class="meta">System</div><div class="text" style="color:var(--muted)">📺 ${stoppedName} stopped screen sharing.</div>`);
+                    break;
+                }
+
+                case 'join-request': {
+                    if (screenState.isSharing) {
+                        await createOfferForViewer(from);
+                    }
+                    break;
+                }
+
+                case 'offer': {
+                    if (!screenState.isWatching) break;
+                    if (screenState.viewerConn) {
+                        screenState.viewerConn.close();
+                        screenState.viewerConn = null;
+                    }
+                    const sharerFrom = from;
+                    const pc = new RTCPeerConnection(RTC_CONFIG);
+                    screenState.viewerConn = pc;
+
+                    pc.onicecandidate = async ({ candidate }) => {
+                        if (candidate) {
+                            await postSignal('ice', sharerFrom, candidate.toJSON());
+                        }
+                    };
+
+                    pc.ontrack = ({ streams }) => {
+                        if (streams && streams[0]) {
+                            screenVideo.srcObject = streams[0];
+                            screenContainer.style.display = '';
+                            screenLabel.textContent = `📺 ${screenState.sharerName || 'Screen'} — Live`;
+                            watchScreenBtn.textContent = 'Watching…';
+                        }
+                    };
+
+                    pc.onconnectionstatechange = () => {
+                        if (['disconnected', 'failed', 'closed'].includes(pc.connectionState)) {
+                            closeViewerConn();
+                        }
+                    };
+
+                    try {
+                        await pc.setRemoteDescription(new RTCSessionDescription({ type: parsed.type, sdp: parsed.sdp }));
+                        const answer = await pc.createAnswer();
+                        await pc.setLocalDescription(answer);
+                        await postSignal('answer', sharerFrom, { type: answer.type, sdp: answer.sdp });
+                    } catch (err) {
+                        console.warn('Failed to handle offer:', err);
+                        closeViewerConn();
+                    }
+                    break;
+                }
+
+                case 'answer': {
+                    if (!screenState.isSharing) break;
+                    const apc = screenState.peerConns[from];
+                    if (apc && apc.signalingState === 'have-local-offer') {
+                        try {
+                            await apc.setRemoteDescription(new RTCSessionDescription({ type: parsed.type, sdp: parsed.sdp }));
+                        } catch (err) {
+                            console.warn('Failed to set remote answer:', err);
+                        }
+                    }
+                    break;
+                }
+
+                case 'ice': {
+                    const candidate = new RTCIceCandidate(parsed);
+                    if (screenState.isSharing && screenState.peerConns[from]) {
+                        await screenState.peerConns[from].addIceCandidate(candidate).catch(console.warn);
+                    } else if (screenState.isWatching && screenState.viewerConn) {
+                        await screenState.viewerConn.addIceCandidate(candidate).catch(console.warn);
+                    }
+                    break;
+                }
+            }
+        };
+
+        const fetchAndHandleSignals = async () => {
+            if (!state.room || !screenState.peerId) return;
+            try {
+                const data = await callApi('fetch-signals', {
+                    room: state.room,
+                    peerId: screenState.peerId,
+                    sinceId: screenState.lastSignalId,
+                });
+                for (const sig of data.signals) {
+                    screenState.lastSignalId = Math.max(screenState.lastSignalId, Number(sig.id || 0));
+                    await handleSignal(sig);
+                }
+                if (data.signals.length === 0 && screenState.warnedWrongKey) {
+                    chatStatus.textContent = '';
+                }
+            } catch (err) {
+                console.warn('Signal fetch failed:', err.message);
+            }
+        };
+
+        const startScreenShare = async () => {
+            if (screenState.isSharing) return;
+            try {
+                const stream = await navigator.mediaDevices.getDisplayMedia({ video: true, audio: false });
+                screenState.stream    = stream;
+                screenState.isSharing = true;
+
+                screenVideo.srcObject = stream;
+                screenContainer.style.display = '';
+                screenLabel.textContent = '📺 Your screen (you are sharing)';
+                shareScreenBtn.textContent = 'Sharing…';
+                shareScreenBtn.disabled    = true;
+                stopScreenBtn.style.display = '';
+
+                await postSignal('screen-available', 'all', { name: state.user });
+
+                // Keep advertising every 5 s so peers that join later discover the share
+                screenState.keepAliveTimer = setInterval(async () => {
+                    if (screenState.isSharing) {
+                        await postSignal('screen-available', 'all', { name: state.user });
+                    }
+                }, 5000);
+
+                // Handle user stopping share from the browser's built-in "Stop sharing" button
+                stream.getVideoTracks()[0].addEventListener('ended', () => stopScreenShare());
+            } catch (err) {
+                if (err.name !== 'NotAllowedError') {
+                    chatStatus.textContent = 'Screen share failed: ' + err.message;
+                }
+            }
+        };
+
+        const stopScreenShare = async () => {
+            if (!screenState.isSharing) return;
+            await postSignal('screen-stopped', 'all', {});
+            closeSharerConns();
+        };
+
+        const requestWatchScreen = async () => {
+            if (screenState.isWatching) return;
+            if (!screenState.sharerPeerId) {
+                chatStatus.textContent = 'No active screen share in this room.';
+                return;
+            }
+            screenState.isWatching = true;
+            watchScreenBtn.textContent = 'Connecting…';
+            watchScreenBtn.disabled    = true;
+            screenLabel.textContent = `📺 Connecting to ${screenState.sharerName || 'screen'}…`;
+            screenContainer.style.display = '';
+            await postSignal('join-request', screenState.sharerPeerId, {});
+        };
+
+        shareScreenBtn.addEventListener('click', startScreenShare);
+        stopScreenBtn.addEventListener('click', stopScreenShare);
+        watchScreenBtn.addEventListener('click', requestWatchScreen);
     </script>
 </body>
 </html>
