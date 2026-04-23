@@ -14,6 +14,7 @@ const MAX_USER_LENGTH = 40;
 const MAX_TEXT_LENGTH = 8000;           // encrypted text is larger than plaintext
 const MAX_ENCRYPTED_IMAGE = 4_000_000; // ~3 MB plaintext image after base64+encryption overhead
 const MAX_SIGNAL_DATA    = 32768;       // enough for SDP offers/answers and ICE candidates
+const MAX_TERMINAL_CHUNK = 24000;       // clipboard/terminal chunks are trimmed to this length
 const SIGNAL_TTL         = 120;         // seconds; stale signals are ignored on read
 
 $storageDir = __DIR__ . '/storage';
@@ -79,7 +80,7 @@ if ($action !== null) {
             $toRaw = (string)($payload['to'] ?? '');
             $to    = $toRaw === 'all' ? 'all' : validatePeerId($toRaw);
             $type  = (string)($payload['type'] ?? '');
-            if (!in_array($type, ['screen-available', 'screen-stopped', 'join-request', 'offer', 'answer', 'ice', 'bye', 'ai-share', 'ai-unshare'], true)) {
+            if (!in_array($type, ['screen-available', 'screen-stopped', 'join-request', 'offer', 'answer', 'ice', 'bye', 'ai-share', 'ai-unshare', 'terminal-available', 'terminal-stopped', 'terminal-output', 'terminal-command'], true)) {
                 throw new RuntimeException('Invalid signal type.');
             }
             $data = (string)($payload['data'] ?? '');
@@ -567,6 +568,16 @@ function fetchSignals(string $room, string $storageDir, string $peerId, int $sin
         #watchScreenBtn:hover  { background: #5a3d8e; }
         #shareAIBtn      { background: #b56e2f; }
         #shareAIBtn:hover      { background: #8d531f; }
+        #downloadTerminalHelperBtn { background: #5a7e28; }
+        #downloadTerminalHelperBtn:hover { background: #46631f; }
+        #copyTerminalHelperBtn { background: #6d8f33; }
+        #copyTerminalHelperBtn:hover { background: #567127; }
+        #shareTerminalBtn { background: #245f8f; }
+        #shareTerminalBtn:hover { background: #1a4a72; }
+        #stopTerminalBtn { background: #8e2f2f; font-size: .85rem; padding: 6px 10px; }
+        #stopTerminalBtn:hover { background: #6e1f1f; }
+        #closeTerminalSetupBtn { background: #6e6a61; }
+        #closeTerminalSetupBtn:hover { background: #545149; }
         #stopScreenBtn   { background: #8e2f2f; font-size: .85rem; padding: 6px 10px; }
         #stopScreenBtn:hover   { background: #6e1f1f; }
 
@@ -640,6 +651,78 @@ function fetchSignals(string $room, string $storageDir, string $peerId, int $sin
             display: block;
             object-fit: contain;
         }
+
+        .terminal-container {
+            border-top: 1px solid var(--border);
+            border-bottom: 1px solid var(--border);
+            padding: 10px 16px;
+            background: #101822;
+            color: #c9d1d9;
+            display: grid;
+            gap: 10px;
+        }
+
+        .terminal-header {
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            font-size: .88rem;
+        }
+
+        .terminal-output {
+            margin: 0;
+            background: #0a1118;
+            border: 1px solid #2f3f52;
+            border-radius: 8px;
+            min-height: 180px;
+            max-height: 360px;
+            overflow: auto;
+            padding: 10px;
+            white-space: pre-wrap;
+            word-break: break-word;
+            font-family: "Consolas", "Courier New", monospace;
+            font-size: .86rem;
+            line-height: 1.4;
+        }
+        .terminal-controls {
+            display: flex;
+            flex-wrap: wrap;
+            gap: 8px;
+            align-items: center;
+        }
+
+        .terminal-controls input {
+            flex: 1 1 320px;
+            min-width: 220px;
+            padding: 10px;
+            border-radius: 8px;
+            border: 1px solid #3f536b;
+            background: #0d1520;
+            color: #d7e2f0;
+        }
+
+        #sendTerminalCommandBtn { background: #1f7b67; }
+        #sendTerminalCommandBtn:hover { background: #185f4f; }
+        #clearTerminalBtn { background: #6e6a61; }
+        #clearTerminalBtn:hover { background: #545149; }
+
+        .terminal-hint {
+            color: #9cb2c7;
+            font-size: .82rem;
+        }
+
+        .terminal-setup-panel {
+            margin-top: 8px;
+        }
+
+        .terminal-manual {
+            margin: 0;
+            padding-left: 18px;
+            color: var(--muted);
+            font-size: .88rem;
+            display: grid;
+            gap: 3px;
+        }
     </style>
 </head>
 <body>
@@ -670,6 +753,8 @@ function fetchSignals(string $room, string $storageDir, string $peerId, int $sin
                     <button id="shareScreenBtn" type="button">Share Screen</button>
                     <button id="watchScreenBtn" type="button" style="display:none">Watch Screen</button>
                     <button id="shareAIBtn"     type="button">Share AI</button>
+                    <button id="shareTerminalBtn" type="button">Share Terminal</button>
+                    <button id="stopTerminalBtn" type="button" style="display:none">Stop Terminal Share</button>
                     <button id="stopScreenBtn"  type="button" style="display:none">Stop Sharing</button>
                     <button id="refreshBtn"     type="button">Refresh Now</button>
                 </div>
@@ -682,6 +767,19 @@ function fetchSignals(string $room, string $storageDir, string $peerId, int $sin
                     <span id="screenLabel">Screen Share</span>
                 </div>
                 <video id="screenVideo" autoplay playsinline muted></video>
+            </section>
+
+            <section id="terminalContainer" class="terminal-container" style="display:none">
+                <div class="terminal-header">
+                    <span id="terminalLabel">Shared Terminal</span>
+                </div>
+                <pre id="terminalOutput" class="terminal-output">Terminal output will appear here.</pre>
+                <div class="terminal-controls">
+                    <input id="terminalCommandInput" type="text" maxlength="1000" placeholder="Type command to execute on helper terminal">
+                    <button id="sendTerminalCommandBtn" type="button">Send Command</button>
+                    <button id="clearTerminalBtn" type="button">Clear</button>
+                </div>
+                <div class="terminal-hint">Terminal chunks and command payloads are encrypted with the room key (AES-GCM).</div>
             </section>
 
             <section class="composer">
@@ -698,6 +796,20 @@ function fetchSignals(string $room, string $storageDir, string $peerId, int $sin
                         <span class="hint">Only AI name, model and API base are announced to the room. API key stays local and encrypted prompts are processed only on your client.</span>
                     </div>
                     <div id="aiShareStatus"></div>
+                </section>
+                <section class="ai-panel terminal-setup-panel" id="terminalSharePanel">
+                    <div class="hint"><strong>Terminal Share Setup</strong></div>
+                    <ol class="terminal-manual">
+                        <li>Download or copy the PowerShell helper script.</li>
+                        <li>Run it on the terminal owner machine with the same room/key (PowerShell 7+ or Windows PowerShell 5.1 on Windows).</li>
+                        <li>Terminal output copied to clipboard is published as encrypted chunks.</li>
+                        <li>Incoming commands are executed automatically and output is posted back.</li>
+                    </ol>
+                    <div class="ai-panel-actions">
+                        <button id="downloadTerminalHelperBtn" type="button">Download PowerShell Helper</button>
+                        <button id="copyTerminalHelperBtn" type="button">Copy Helper Script</button>
+                        <button id="closeTerminalSetupBtn" type="button">Close</button>
+                    </div>
                 </section>
                 <div class="composer-actions">
                     <span class="hint">Auto-refresh every 3s. Ctrl+Enter to send. Markdown supported. Use AIName: prompt to request a shared AI.</span>
@@ -760,7 +872,10 @@ function fetchSignals(string $room, string $storageDir, string $peerId, int $sin
             pendingImage: '',
             pollTimer: null,
             cryptoKey: null,
+            channelSecret: '',
         };
+
+        const TERMINAL_MAX_CHUNK = <?php echo MAX_TERMINAL_CHUNK; ?>;
 
         const aiState = {
             providers: {},
@@ -792,6 +907,15 @@ function fetchSignals(string $room, string $storageDir, string $peerId, int $sin
             warnedWrongKey: false,
         };
 
+        const terminalState = {
+            isSharing: false,
+            helperPeerId: null,
+            activePeerId: null,
+            sharerName: null,
+            keepAliveTimer: null,
+            warnedWrongKey: false,
+        };
+
         const joinView = document.getElementById('joinView');
         const chatView = document.getElementById('chatView');
         const roomInput = document.getElementById('roomInput');
@@ -817,6 +941,18 @@ function fetchSignals(string $room, string $storageDir, string $peerId, int $sin
         const saveAIShareBtn = document.getElementById('saveAIShareBtn');
         const cancelAIShareBtn = document.getElementById('cancelAIShareBtn');
         const aiShareStatus = document.getElementById('aiShareStatus');
+        const terminalSharePanel = document.getElementById('terminalSharePanel');
+        const downloadTerminalHelperBtn = document.getElementById('downloadTerminalHelperBtn');
+        const copyTerminalHelperBtn = document.getElementById('copyTerminalHelperBtn');
+        const closeTerminalSetupBtn = document.getElementById('closeTerminalSetupBtn');
+        const shareTerminalBtn = document.getElementById('shareTerminalBtn');
+        const stopTerminalBtn = document.getElementById('stopTerminalBtn');
+        const terminalContainer = document.getElementById('terminalContainer');
+        const terminalLabel = document.getElementById('terminalLabel');
+        const terminalOutput = document.getElementById('terminalOutput');
+        const terminalCommandInput = document.getElementById('terminalCommandInput');
+        const sendTerminalCommandBtn = document.getElementById('sendTerminalCommandBtn');
+        const clearTerminalBtn = document.getElementById('clearTerminalBtn');
 
         const callApi = async (action, payload) => {
             const response = await fetch(`?action=${encodeURIComponent(action)}`, {
@@ -1245,6 +1381,7 @@ function fetchSignals(string $room, string $storageDir, string $peerId, int $sin
             joinStatus.textContent = '';
             state.room = room;
             state.user = user;
+            state.channelSecret = channelKey || room;
             state.sinceId = 0;
             aiState.providers = {};
             aiState.localShares = {};
@@ -1266,6 +1403,21 @@ function fetchSignals(string $room, string $storageDir, string $peerId, int $sin
             clearInterval(state.pollTimer);
             screenState.peerId       = generatePeerId();
             screenState.lastSignalId = 0;
+            terminalState.activePeerId = null;
+            terminalState.sharerName = null;
+            terminalState.helperPeerId = null;
+            terminalState.isSharing = false;
+            terminalState.warnedWrongKey = false;
+            clearInterval(terminalState.keepAliveTimer);
+            terminalState.keepAliveTimer = null;
+            shareTerminalBtn.textContent = 'Share Terminal';
+            shareTerminalBtn.disabled = false;
+            shareTerminalBtn.style.display = '';
+            stopTerminalBtn.style.display = 'none';
+            terminalLabel.textContent = 'Shared Terminal';
+            terminalOutput.textContent = 'Terminal output will appear here.';
+            terminalSharePanel.classList.remove('visible');
+            terminalContainer.style.display = 'none';
             state.pollTimer = setInterval(async () => {
                 await refreshMessages();
                 await fetchAndHandleSignals();
@@ -1423,6 +1575,625 @@ function fetchSignals(string $room, string $storageDir, string $peerId, int $sin
             messagesEl.scrollTop = messagesEl.scrollHeight;
         };
 
+        const isValidPeerId = (value) => /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/.test(value);
+
+        const escapePsSingleQuoted = (value) => String(value).replaceAll("'", "''");
+
+        const buildPowerShellHelperScript = () => {
+            const serverBase = `${window.location.origin}${window.location.pathname}`;
+            const room = state.room;
+            const secret = state.channelSecret || state.room;
+            const userName = state.user;
+            const helperPeerId = terminalState.helperPeerId || generatePeerId();
+
+            return `# Local Temporary Talk Chat terminal helper (PowerShell 7+ or Windows PowerShell 5.1 on Windows)
+$ErrorActionPreference = 'Stop'
+
+$ServerBase = '${escapePsSingleQuoted(serverBase)}'
+$Room = '${escapePsSingleQuoted(room)}'
+$Secret = '${escapePsSingleQuoted(secret)}'
+$UserName = '${escapePsSingleQuoted(userName)}'
+$PeerId = '${escapePsSingleQuoted(helperPeerId)}'
+$SinceId = 0
+$LastClipboard = ''
+$Salt = [System.Text.Encoding]::UTF8.GetBytes('LocalTalkChat-v1-salt')
+
+$HasDotNetAesGcm = [bool]('System.Security.Cryptography.AesGcm' -as [type])
+$UseWinCngAesGcm = $false
+
+if (-not $HasDotNetAesGcm) {
+    if ($env:OS -ne 'Windows_NT') {
+        throw "AES-GCM runtime support is unavailable. Use PowerShell 7+ on this platform."
+    }
+
+    Add-Type -Language CSharp -TypeDefinition @"
+using System;
+using System.Runtime.InteropServices;
+using System.Text;
+
+public static class WinAesGcmCompat
+{
+    [StructLayout(LayoutKind.Sequential)]
+    private struct BCRYPT_AUTHENTICATED_CIPHER_MODE_INFO
+    {
+        public int cbSize;
+        public int dwInfoVersion;
+        public IntPtr pbNonce;
+        public int cbNonce;
+        public IntPtr pbAuthData;
+        public int cbAuthData;
+        public IntPtr pbTag;
+        public int cbTag;
+        public IntPtr pbMacContext;
+        public int cbMacContext;
+        public int cbAAD;
+        public long cbData;
+        public int dwFlags;
+    }
+
+    private const string BCRYPT_AES_ALGORITHM = "AES";
+    private const string BCRYPT_CHAINING_MODE = "ChainingMode";
+    private const string BCRYPT_CHAIN_MODE_GCM = "ChainingModeGCM";
+
+    [DllImport("bcrypt.dll", CharSet = CharSet.Unicode)]
+    private static extern int BCryptOpenAlgorithmProvider(out IntPtr phAlgorithm, string pszAlgId, string pszImplementation, int dwFlags);
+
+    [DllImport("bcrypt.dll")]
+    private static extern int BCryptCloseAlgorithmProvider(IntPtr hAlgorithm, int dwFlags);
+
+    [DllImport("bcrypt.dll", CharSet = CharSet.Unicode)]
+    private static extern int BCryptSetProperty(IntPtr hObject, string pszProperty, byte[] pbInput, int cbInput, int dwFlags);
+
+    [DllImport("bcrypt.dll")]
+    private static extern int BCryptGenerateSymmetricKey(IntPtr hAlgorithm, out IntPtr phKey, IntPtr pbKeyObject, int cbKeyObject, byte[] pbSecret, int cbSecret, int dwFlags);
+
+    [DllImport("bcrypt.dll")]
+    private static extern int BCryptDestroyKey(IntPtr hKey);
+
+    [DllImport("bcrypt.dll")]
+    private static extern int BCryptEncrypt(IntPtr hKey, byte[] pbInput, int cbInput, ref BCRYPT_AUTHENTICATED_CIPHER_MODE_INFO pPaddingInfo, IntPtr pbIV, int cbIV, byte[] pbOutput, int cbOutput, out int pcbResult, int dwFlags);
+
+    [DllImport("bcrypt.dll")]
+    private static extern int BCryptDecrypt(IntPtr hKey, byte[] pbInput, int cbInput, ref BCRYPT_AUTHENTICATED_CIPHER_MODE_INFO pPaddingInfo, IntPtr pbIV, int cbIV, byte[] pbOutput, int cbOutput, out int pcbResult, int dwFlags);
+
+    private static void Check(int status, string op)
+    {
+        if (status != 0)
+        {
+            throw new InvalidOperationException(op + " failed with NTSTATUS 0x" + status.ToString("X8"));
+        }
+    }
+
+    private static IntPtr CreateAesGcmKey(byte[] key, out IntPtr hAlg)
+    {
+        Check(BCryptOpenAlgorithmProvider(out hAlg, BCRYPT_AES_ALGORITHM, null, 0), "BCryptOpenAlgorithmProvider");
+        try
+        {
+            byte[] gcm = Encoding.Unicode.GetBytes(BCRYPT_CHAIN_MODE_GCM + "\0");
+            Check(BCryptSetProperty(hAlg, BCRYPT_CHAINING_MODE, gcm, gcm.Length, 0), "BCryptSetProperty");
+
+            IntPtr hKey;
+            Check(BCryptGenerateSymmetricKey(hAlg, out hKey, IntPtr.Zero, 0, key, key.Length, 0), "BCryptGenerateSymmetricKey");
+            return hKey;
+        }
+        catch
+        {
+            BCryptCloseAlgorithmProvider(hAlg, 0);
+            throw;
+        }
+    }
+
+    public static byte[] Encrypt(byte[] key, byte[] nonce, byte[] plaintext, out byte[] tag)
+    {
+        IntPtr hAlg = IntPtr.Zero;
+        IntPtr hKey = IntPtr.Zero;
+        GCHandle nonceHandle = default(GCHandle);
+        GCHandle tagHandle = default(GCHandle);
+        try
+        {
+            hKey = CreateAesGcmKey(key, out hAlg);
+            byte[] ciphertext = new byte[plaintext.Length];
+            tag = new byte[16];
+
+            nonceHandle = GCHandle.Alloc(nonce, GCHandleType.Pinned);
+            tagHandle = GCHandle.Alloc(tag, GCHandleType.Pinned);
+
+            BCRYPT_AUTHENTICATED_CIPHER_MODE_INFO info = new BCRYPT_AUTHENTICATED_CIPHER_MODE_INFO();
+            info.cbSize = Marshal.SizeOf(typeof(BCRYPT_AUTHENTICATED_CIPHER_MODE_INFO));
+            info.dwInfoVersion = 1;
+            info.pbNonce = nonceHandle.AddrOfPinnedObject();
+            info.cbNonce = nonce.Length;
+            info.pbAuthData = IntPtr.Zero;
+            info.cbAuthData = 0;
+            info.pbTag = tagHandle.AddrOfPinnedObject();
+            info.cbTag = tag.Length;
+            info.pbMacContext = IntPtr.Zero;
+            info.cbMacContext = 0;
+            info.cbAAD = 0;
+            info.cbData = 0;
+            info.dwFlags = 0;
+
+            int result;
+            Check(BCryptEncrypt(hKey, plaintext, plaintext.Length, ref info, IntPtr.Zero, 0, ciphertext, ciphertext.Length, out result, 0), "BCryptEncrypt");
+            if (result != ciphertext.Length)
+            {
+                throw new InvalidOperationException("Unexpected ciphertext length from BCryptEncrypt");
+            }
+            return ciphertext;
+        }
+        finally
+        {
+            if (tagHandle.IsAllocated) tagHandle.Free();
+            if (nonceHandle.IsAllocated) nonceHandle.Free();
+            if (hKey != IntPtr.Zero) BCryptDestroyKey(hKey);
+            if (hAlg != IntPtr.Zero) BCryptCloseAlgorithmProvider(hAlg, 0);
+        }
+    }
+
+    public static byte[] Decrypt(byte[] key, byte[] nonce, byte[] ciphertext, byte[] tag)
+    {
+        IntPtr hAlg = IntPtr.Zero;
+        IntPtr hKey = IntPtr.Zero;
+        GCHandle nonceHandle = default(GCHandle);
+        GCHandle tagHandle = default(GCHandle);
+        try
+        {
+            hKey = CreateAesGcmKey(key, out hAlg);
+            byte[] plaintext = new byte[ciphertext.Length];
+
+            nonceHandle = GCHandle.Alloc(nonce, GCHandleType.Pinned);
+            tagHandle = GCHandle.Alloc(tag, GCHandleType.Pinned);
+
+            BCRYPT_AUTHENTICATED_CIPHER_MODE_INFO info = new BCRYPT_AUTHENTICATED_CIPHER_MODE_INFO();
+            info.cbSize = Marshal.SizeOf(typeof(BCRYPT_AUTHENTICATED_CIPHER_MODE_INFO));
+            info.dwInfoVersion = 1;
+            info.pbNonce = nonceHandle.AddrOfPinnedObject();
+            info.cbNonce = nonce.Length;
+            info.pbAuthData = IntPtr.Zero;
+            info.cbAuthData = 0;
+            info.pbTag = tagHandle.AddrOfPinnedObject();
+            info.cbTag = tag.Length;
+            info.pbMacContext = IntPtr.Zero;
+            info.cbMacContext = 0;
+            info.cbAAD = 0;
+            info.cbData = 0;
+            info.dwFlags = 0;
+
+            int result;
+            Check(BCryptDecrypt(hKey, ciphertext, ciphertext.Length, ref info, IntPtr.Zero, 0, plaintext, plaintext.Length, out result, 0), "BCryptDecrypt");
+            if (result != plaintext.Length)
+            {
+                throw new InvalidOperationException("Unexpected plaintext length from BCryptDecrypt");
+            }
+            return plaintext;
+        }
+        finally
+        {
+            if (tagHandle.IsAllocated) tagHandle.Free();
+            if (nonceHandle.IsAllocated) nonceHandle.Free();
+            if (hKey != IntPtr.Zero) BCryptDestroyKey(hKey);
+            if (hAlg != IntPtr.Zero) BCryptCloseAlgorithmProvider(hAlg, 0);
+        }
+    }
+}
+"@
+
+    $UseWinCngAesGcm = $true
+}
+
+function New-RoomKey([string]$SecretValue) {
+    $derive = [System.Security.Cryptography.Rfc2898DeriveBytes]::new(
+        [System.Text.Encoding]::UTF8.GetBytes($SecretValue),
+        $Salt,
+        200000,
+        [System.Security.Cryptography.HashAlgorithmName]::SHA256
+    )
+    try {
+        return $derive.GetBytes(32)
+    } finally {
+        $derive.Dispose()
+    }
+}
+
+function Encrypt-Text([byte[]]$Key, [string]$PlainText) {
+    $iv = New-Object byte[] 12
+    $rng = [System.Security.Cryptography.RandomNumberGenerator]::Create()
+    try {
+        $rng.GetBytes($iv)
+    } finally {
+        $rng.Dispose()
+    }
+    $plainBytes = [System.Text.Encoding]::UTF8.GetBytes($PlainText)
+    $cipherBytes = New-Object byte[] $plainBytes.Length
+    $tag = New-Object byte[] 16
+    if ($HasDotNetAesGcm) {
+        $aes = [System.Security.Cryptography.AesGcm]::new($Key)
+        try {
+            $aes.Encrypt($iv, $plainBytes, $cipherBytes, $tag)
+        } finally {
+            $aes.Dispose()
+        }
+    } elseif ($UseWinCngAesGcm) {
+        $cipherBytes = [WinAesGcmCompat]::Encrypt($Key, $iv, $plainBytes, [ref]$tag)
+    } else {
+        throw 'No AES-GCM implementation available in this runtime.'
+    }
+    $all = New-Object byte[] (12 + $cipherBytes.Length + 16)
+    [Array]::Copy($iv, 0, $all, 0, 12)
+    [Array]::Copy($cipherBytes, 0, $all, 12, $cipherBytes.Length)
+    [Array]::Copy($tag, 0, $all, 12 + $cipherBytes.Length, 16)
+    return [Convert]::ToBase64String($all)
+}
+
+function Decrypt-Text([byte[]]$Key, [string]$CipherB64) {
+    $all = [Convert]::FromBase64String($CipherB64)
+    if ($all.Length -lt 29) {
+        throw 'Ciphertext too short.'
+    }
+    $iv = New-Object byte[] 12
+    [Array]::Copy($all, 0, $iv, 0, 12)
+    $tag = New-Object byte[] 16
+    [Array]::Copy($all, $all.Length - 16, $tag, 0, 16)
+    $cipherLen = $all.Length - 28
+    $cipherBytes = New-Object byte[] $cipherLen
+    [Array]::Copy($all, 12, $cipherBytes, 0, $cipherLen)
+    $plainBytes = New-Object byte[] $cipherLen
+    if ($HasDotNetAesGcm) {
+        $aes = [System.Security.Cryptography.AesGcm]::new($Key)
+        try {
+            $aes.Decrypt($iv, $cipherBytes, $tag, $plainBytes)
+        } finally {
+            $aes.Dispose()
+        }
+    } elseif ($UseWinCngAesGcm) {
+        $plainBytes = [WinAesGcmCompat]::Decrypt($Key, $iv, $cipherBytes, $tag)
+    } else {
+        throw 'No AES-GCM implementation available in this runtime.'
+    }
+    return [System.Text.Encoding]::UTF8.GetString($plainBytes)
+}
+
+function Resolve-BaseUri([string]$InputValue) {
+    $candidate = [string]$InputValue
+    $candidate = $candidate.Trim().Trim([char]39).Trim([char]34)
+    if ([string]::IsNullOrWhiteSpace($candidate)) {
+        throw 'Server base URL is empty.'
+    }
+    if ($candidate.StartsWith('//')) {
+        $candidate = 'https:' + $candidate
+    }
+    if ($candidate -notmatch '^[A-Za-z][A-Za-z0-9+.-]*://') {
+        $candidate = 'https://' + $candidate
+    }
+
+    try {
+        $uri = [System.Uri]$candidate
+    } catch {
+        throw "Invalid server URL: '$InputValue'"
+    }
+
+    if (-not $uri.IsAbsoluteUri -or [string]::IsNullOrWhiteSpace($uri.Host)) {
+        throw "Invalid server URL (hostname could not be parsed): '$InputValue'"
+    }
+
+    return $uri
+}
+
+$ServerBaseUri = Resolve-BaseUri $ServerBase
+
+function Invoke-ChatApi([string]$Action, [hashtable]$Payload) {
+    $builder = [System.UriBuilder]::new($ServerBaseUri)
+    if ([string]::IsNullOrWhiteSpace($builder.Path)) {
+        $builder.Path = '/'
+    }
+    $existingQuery = $builder.Query
+    if ($existingQuery.StartsWith('?')) {
+        $existingQuery = $existingQuery.Substring(1)
+    }
+    $actionQuery = 'action=' + [System.Uri]::EscapeDataString($Action)
+    $builder.Query = if ([string]::IsNullOrWhiteSpace($existingQuery)) { $actionQuery } else { "$existingQuery&$actionQuery" }
+    $uri = $builder.Uri.AbsoluteUri
+    try {
+        return Invoke-RestMethod -Method Post -Uri $uri -ContentType 'application/json' -Body ($Payload | ConvertTo-Json -Compress -Depth 8)
+    } catch {
+        $response = $_.Exception.Response
+        $statusCode = if ($response) { [int]$response.StatusCode } else { 0 }
+        $responseBody = ''
+        if ($response) {
+            try {
+                $stream = $response.GetResponseStream()
+                if ($stream) {
+                    $reader = New-Object System.IO.StreamReader($stream)
+                    try {
+                        $responseBody = $reader.ReadToEnd()
+                    } finally {
+                        $reader.Dispose()
+                    }
+                }
+            } catch {
+                $responseBody = ''
+            }
+        }
+
+        if ($statusCode -eq 401) {
+            $hostName = $ServerBaseUri.Host
+            throw "HTTP 401 Unauthorized for $hostName. If this is a GitHub Codespaces URL (*.app.github.dev), set forwarded port 8081 visibility to Public in the Ports panel, then download/copy a fresh helper script and run again."
+        }
+
+        if ($statusCode -gt 0) {
+            if ([string]::IsNullOrWhiteSpace($responseBody)) {
+                throw "HTTP $statusCode while calling $uri"
+            }
+            throw "HTTP $statusCode while calling $uri. Response: $responseBody"
+        }
+
+        throw ("Request failed while calling {0}: {1}" -f $uri, $_.Exception.Message)
+    }
+}
+
+function Post-Signal([byte[]]$Key, [string]$Type, [string]$To, [hashtable]$Data) {
+    $plain = ($Data | ConvertTo-Json -Compress -Depth 8)
+    $enc = Encrypt-Text -Key $Key -PlainText $plain
+    [void](Invoke-ChatApi -Action 'signal' -Payload @{
+        room = $Room
+        from = $PeerId
+        to = $To
+        type = $Type
+        data = $enc
+    })
+}
+
+$RoomKey = New-RoomKey -SecretValue $Secret
+
+Write-Host "Terminal helper is running for room '$Room'."
+Write-Host 'When a command arrives from a viewer, it will be executed and the output sent back automatically.'
+
+[void](Invoke-ChatApi -Action 'fetch-signals' -Payload @{ room = $Room; peerId = $PeerId; sinceId = 0 })
+Write-Host 'Connected to chat API successfully.'
+
+$HelperEnabled = $true
+
+Post-Signal -Key $RoomKey -Type 'terminal-available' -To 'all' -Data @{ name = $UserName; helperPeerId = $PeerId }
+
+while ($true) {
+    try {
+        $signals = Invoke-ChatApi -Action 'fetch-signals' -Payload @{ room = $Room; peerId = $PeerId; sinceId = $SinceId }
+        foreach ($sig in ($signals.signals | Sort-Object id)) {
+            $SinceId = [Math]::Max($SinceId, [int]$sig.id)
+            if (($sig.type -eq 'terminal-stopped' -or $sig.type -eq 'terminal-available') -and $sig.data) {
+                try {
+                    $plain = Decrypt-Text -Key $RoomKey -CipherB64 $sig.data
+                    $payload = ConvertFrom-Json -InputObject $plain
+                    $targetHelper = [string]$payload.helperPeerId
+                    if ($targetHelper -and $targetHelper -eq $PeerId) {
+                        if ($sig.type -eq 'terminal-stopped') {
+                            if ($HelperEnabled) {
+                                Write-Host 'Terminal sharing stopped by broadcaster. Helper is paused.'
+                            }
+                            $HelperEnabled = $false
+                        } else {
+                            if (-not $HelperEnabled) {
+                                Write-Host 'Terminal sharing resumed by broadcaster.'
+                            }
+                            $HelperEnabled = $true
+                        }
+                    }
+                } catch {
+                    Write-Host "Failed to process helper lifecycle signal: $($_.Exception.Message)"
+                }
+                continue
+            }
+            if ($sig.type -eq 'terminal-command' -and $sig.data) {
+                if (-not $HelperEnabled) {
+                    continue
+                }
+                try {
+                    $plain = Decrypt-Text -Key $RoomKey -CipherB64 $sig.data
+                    $cmd = (ConvertFrom-Json -InputObject $plain).command
+                    if ($cmd) {
+                        Write-Host "Command received from viewer, executing: $cmd"
+                        try {
+                            $isCmdStyle = $cmd -match '^(?i)\s*(dir|copy|del|move|type|cd|chdir|cls|echo|set|where|find|findstr|tasklist|ipconfig|ping|systeminfo)\b'
+                            if ($isCmdStyle) {
+                                $output = & cmd.exe /d /s /c $cmd 2>&1 | Out-String
+                            } else {
+                                $output = Invoke-Expression $cmd 2>&1 | Out-String
+                            }
+                        } catch {
+                            $output = "Execution failed: $($_.Exception.Message)"
+                        }
+                        $chunk = "> $cmd" + [Environment]::NewLine + $output
+                        if ($chunk.Length -gt ${TERMINAL_MAX_CHUNK}) {
+                            $chunk = $chunk.Substring($chunk.Length - ${TERMINAL_MAX_CHUNK})
+                        }
+                        Post-Signal -Key $RoomKey -Type 'terminal-output' -To 'all' -Data @{ name = $UserName; chunk = $chunk; source = 'exec' }
+                        $LastClipboard = $chunk
+                    }
+                } catch {
+                    Write-Host "Failed to process terminal command: $($_.Exception.Message)"
+                }
+            }
+        }
+
+        if ($HelperEnabled) {
+            $clip = Get-Clipboard -Raw -ErrorAction SilentlyContinue
+            if ($clip -and $clip -ne $LastClipboard) {
+                $trimmedClip = $clip.TrimStart()
+                if ($trimmedClip.StartsWith('# Local Temporary Talk Chat terminal helper')) {
+                    $LastClipboard = $clip
+                    continue
+                }
+                if ($trimmedClip.Contains("$ServerBase = '") -and $trimmedClip.Contains("$Room = '") -and $trimmedClip.Contains("$Secret = '")) {
+                    $LastClipboard = $clip
+                    continue
+                }
+                if ($clip.Length -gt ${TERMINAL_MAX_CHUNK}) {
+                    $clip = $clip.Substring($clip.Length - ${TERMINAL_MAX_CHUNK})
+                }
+                Post-Signal -Key $RoomKey -Type 'terminal-output' -To 'all' -Data @{ name = $UserName; chunk = $clip; source = 'clipboard' }
+                $LastClipboard = $clip
+            }
+
+            Post-Signal -Key $RoomKey -Type 'terminal-available' -To 'all' -Data @{ name = $UserName; helperPeerId = $PeerId }
+        }
+    } catch {
+        Write-Host "Helper loop warning: $($_.Exception.Message)"
+    }
+    Start-Sleep -Milliseconds 1600
+}
+`;
+        };
+
+        const downloadPowerShellHelper = () => {
+            if (!state.room || !state.cryptoKey) {
+                chatStatus.textContent = 'Join a room before downloading helper.';
+                return;
+            }
+            if (!terminalState.helperPeerId) {
+                terminalState.helperPeerId = generatePeerId();
+            }
+            const content = buildPowerShellHelperScript();
+            const blob = new Blob([content], { type: 'text/plain;charset=utf-8' });
+            const url = URL.createObjectURL(blob);
+            const link = document.createElement('a');
+            link.href = url;
+            const safeRoom = state.room.replace(/[^A-Za-z0-9._-]+/g, '-').slice(0, 40) || 'room';
+            link.download = `terminal-helper-${safeRoom}.ps1`;
+            document.body.appendChild(link);
+            link.click();
+            link.remove();
+            URL.revokeObjectURL(url);
+            chatStatus.textContent = 'PowerShell helper downloaded. Run it in PowerShell 7+ or Windows PowerShell 5.1 on Windows.';
+        };
+
+        const copyPowerShellHelper = async () => {
+            if (!state.room || !state.cryptoKey) {
+                chatStatus.textContent = 'Join a room before copying helper script.';
+                return;
+            }
+            if (!terminalState.helperPeerId) {
+                terminalState.helperPeerId = generatePeerId();
+            }
+
+            const content = buildPowerShellHelperScript();
+
+            if (navigator.clipboard?.writeText) {
+                await navigator.clipboard.writeText(content);
+                chatStatus.textContent = 'PowerShell helper script copied. Paste into PowerShell 7+ or Windows PowerShell 5.1 on Windows.';
+                return;
+            }
+
+            const fallback = document.createElement('textarea');
+            fallback.value = content;
+            fallback.setAttribute('readonly', 'readonly');
+            fallback.style.position = 'fixed';
+            fallback.style.left = '-9999px';
+            document.body.appendChild(fallback);
+            fallback.focus();
+            fallback.select();
+            const copied = document.execCommand('copy');
+            document.body.removeChild(fallback);
+            if (!copied) {
+                throw new Error('Clipboard API unavailable in this browser context.');
+            }
+            chatStatus.textContent = 'PowerShell helper script copied. Paste into PowerShell 7+ or Windows PowerShell 5.1 on Windows.';
+        };
+
+        const appendTerminalChunk = (chunk, sharerName) => {
+            const maxChars = 100000;
+            const stamp = new Date().toLocaleTimeString();
+            const normalized = String(chunk || '').replace(/\r\n/g, '\n').replace(/\r/g, '\n');
+            const trimmed = normalized.trimStart();
+            if (trimmed.startsWith('# Local Temporary Talk Chat terminal helper')) {
+                return;
+            }
+            if (trimmed.includes("$ServerBase = '") && trimmed.includes("$Room = '") && trimmed.includes("$Secret = '")) {
+                return;
+            }
+            const block = `[${stamp}] ${sharerName}:\n${normalized}\n\n`;
+            const previous = terminalOutput.textContent === 'Terminal output will appear here.' ? '' : terminalOutput.textContent;
+            const merged = previous + block;
+            terminalOutput.textContent = merged.length > maxChars ? merged.slice(merged.length - maxChars) : merged;
+            terminalOutput.scrollTop = terminalOutput.scrollHeight;
+        };
+
+        const startTerminalShare = async () => {
+            if (!state.room || !screenState.peerId) {
+                chatStatus.textContent = 'Join a room first.';
+                return;
+            }
+            if (!terminalState.helperPeerId) {
+                terminalState.helperPeerId = generatePeerId();
+            }
+
+            terminalState.isSharing = true;
+            shareTerminalBtn.style.display = 'none';
+            stopTerminalBtn.style.display = '';
+            terminalSharePanel.classList.add('visible');
+            terminalLabel.textContent = 'Shared Terminal - Waiting for helper output...';
+            terminalContainer.style.display = '';
+
+            await postSignal('terminal-available', 'all', {
+                name: state.user,
+                helperPeerId: terminalState.helperPeerId,
+            });
+
+            clearInterval(terminalState.keepAliveTimer);
+            terminalState.keepAliveTimer = setInterval(async () => {
+                if (!terminalState.isSharing || !terminalState.helperPeerId) {
+                    return;
+                }
+                await postSignal('terminal-available', 'all', {
+                    name: state.user,
+                    helperPeerId: terminalState.helperPeerId,
+                });
+            }, 7000);
+
+            chatStatus.textContent = 'Terminal share announced. Start the downloaded PowerShell helper on the owner computer.';
+        };
+
+        const stopTerminalShare = async () => {
+            if (!terminalState.isSharing) {
+                return;
+            }
+            if (terminalState.helperPeerId) {
+                await postSignal('terminal-stopped', 'all', {
+                    helperPeerId: terminalState.helperPeerId,
+                    name: state.user,
+                });
+            }
+            clearInterval(terminalState.keepAliveTimer);
+            terminalState.keepAliveTimer = null;
+            terminalState.isSharing = false;
+            terminalState.activePeerId = null;
+            terminalState.sharerName = null;
+            shareTerminalBtn.textContent = 'Share Terminal';
+            shareTerminalBtn.disabled = false;
+            shareTerminalBtn.style.display = '';
+            stopTerminalBtn.style.display = 'none';
+            terminalContainer.style.display = 'none';
+            terminalLabel.textContent = 'Shared Terminal';
+            terminalOutput.textContent = 'Terminal output will appear here.';
+        };
+
+        const sendTerminalCommand = async () => {
+            const command = terminalCommandInput.value.trim();
+            if (!command) {
+                chatStatus.textContent = 'Type a command to send.';
+                return;
+            }
+            if (!terminalState.activePeerId) {
+                chatStatus.textContent = 'No active terminal helper in this room.';
+                return;
+            }
+            await postSignal('terminal-command', terminalState.activePeerId, {
+                command,
+                fromName: state.user,
+            });
+            terminalCommandInput.value = '';
+            chatStatus.textContent = 'Command sent to helper.';
+        };
+
         const closeViewerConn = () => {
             if (screenState.viewerConn) {
                 screenState.viewerConn.close();
@@ -1497,7 +2268,15 @@ function fetchSignals(string $room, string $storageDir, string $peerId, int $sin
                     const decrypted = await decryptText(state.cryptoKey, data);
                     parsed = decrypted ? JSON.parse(decrypted) : {};
                     screenState.warnedWrongKey = false;
+                    terminalState.warnedWrongKey = false;
                 } catch (_) {
+                    if (type.startsWith('terminal-')) {
+                        if (!terminalState.warnedWrongKey) {
+                            chatStatus.textContent = 'Terminal signal ignored: wrong encryption key for this room.';
+                            terminalState.warnedWrongKey = true;
+                        }
+                        return;
+                    }
                     if (!screenState.warnedWrongKey) {
                         chatStatus.textContent = 'Screen-share signal ignored: wrong encryption key for this room.';
                         screenState.warnedWrongKey = true;
@@ -1636,6 +2415,51 @@ function fetchSignals(string $room, string $storageDir, string $peerId, int $sin
                     }
                     break;
                 }
+
+                case 'terminal-available': {
+                    const helperPeerId = (parsed.helperPeerId || '').trim();
+                    if (!isValidPeerId(helperPeerId)) {
+                        break;
+                    }
+                    terminalState.activePeerId = helperPeerId;
+                    terminalState.sharerName = (parsed.name || 'Someone').trim() || 'Someone';
+                    terminalState.warnedWrongKey = false;
+                    terminalLabel.textContent = `Shared Terminal - ${terminalState.sharerName}`;
+                    terminalContainer.style.display = '';
+                    break;
+                }
+
+                case 'terminal-stopped': {
+                    const helperPeerId = (parsed.helperPeerId || '').trim();
+                    if (helperPeerId && helperPeerId !== terminalState.activePeerId) {
+                        break;
+                    }
+                    terminalState.activePeerId = null;
+                    terminalState.sharerName = null;
+                    terminalContainer.style.display = 'none';
+                    terminalLabel.textContent = 'Shared Terminal';
+                    terminalOutput.textContent = 'Terminal output will appear here.';
+                    break;
+                }
+
+                case 'terminal-output': {
+                    const chunk = typeof parsed.chunk === 'string' ? parsed.chunk : '';
+                    if (!chunk) {
+                        break;
+                    }
+                    if (terminalState.activePeerId && from !== terminalState.activePeerId) {
+                        break;
+                    }
+                    if (!terminalState.activePeerId) {
+                        terminalState.activePeerId = from;
+                    }
+                    const sharerName = (parsed.name || terminalState.sharerName || 'Terminal').trim() || 'Terminal';
+                    terminalState.sharerName = sharerName;
+                    terminalLabel.textContent = `Shared Terminal - ${sharerName}`;
+                    terminalContainer.style.display = '';
+                    appendTerminalChunk(chunk, sharerName);
+                    break;
+                }
             }
         };
 
@@ -1651,7 +2475,7 @@ function fetchSignals(string $room, string $storageDir, string $peerId, int $sin
                     screenState.lastSignalId = Math.max(screenState.lastSignalId, Number(sig.id || 0));
                     await handleSignal(sig);
                 }
-                if (data.signals.length === 0 && screenState.warnedWrongKey) {
+                if (data.signals.length === 0 && (screenState.warnedWrongKey || terminalState.warnedWrongKey)) {
                     chatStatus.textContent = '';
                 }
             } catch (err) {
@@ -1714,6 +2538,40 @@ function fetchSignals(string $room, string $storageDir, string $peerId, int $sin
         shareScreenBtn.addEventListener('click', startScreenShare);
         stopScreenBtn.addEventListener('click', stopScreenShare);
         watchScreenBtn.addEventListener('click', requestWatchScreen);
+        downloadTerminalHelperBtn.addEventListener('click', downloadPowerShellHelper);
+        copyTerminalHelperBtn.addEventListener('click', async () => {
+            try {
+                await copyPowerShellHelper();
+            } catch (err) {
+                chatStatus.textContent = 'Copy helper error: ' + err.message;
+            }
+        });
+        closeTerminalSetupBtn.addEventListener('click', () => {
+            terminalSharePanel.classList.remove('visible');
+        });
+        shareTerminalBtn.addEventListener('click', startTerminalShare);
+        stopTerminalBtn.addEventListener('click', stopTerminalShare);
+        sendTerminalCommandBtn.addEventListener('click', async () => {
+            try {
+                await sendTerminalCommand();
+            } catch (err) {
+                chatStatus.textContent = 'Terminal command error: ' + err.message;
+            }
+        });
+        terminalCommandInput.addEventListener('keydown', async (e) => {
+            if (e.key !== 'Enter') {
+                return;
+            }
+            e.preventDefault();
+            try {
+                await sendTerminalCommand();
+            } catch (err) {
+                chatStatus.textContent = 'Terminal command error: ' + err.message;
+            }
+        });
+        clearTerminalBtn.addEventListener('click', () => {
+            terminalOutput.textContent = 'Terminal output will appear here.';
+        });
     </script>
 </body>
 </html>

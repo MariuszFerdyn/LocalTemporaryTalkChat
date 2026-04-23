@@ -8,6 +8,7 @@ A lightweight, file-based chat application written in PHP 8 with **client-side e
 - **No Sockets**: Chat refreshes automatically every 3 seconds—no WebSockets or long-polling overhead.
 - **Encrypted Images**: Paste images via Ctrl+V; they are encrypted before being sent to server.
 - **Encrypted Screen Sharing**: WebRTC screen-share signaling (SDP offers/answers, ICE candidates) is encrypted with the same room key. Clients with a wrong key cannot negotiate or view a screen share.
+- **Encrypted Terminal Share Bridge**: Participants can share terminal output using a PowerShell helper. Clipboard/output chunks and remote command payloads are AES-GCM encrypted with the room key before relay.
 - **Markdown Rendering**: Messages (including AI replies) support markdown formatting and are rendered safely in chat.
 - **Shared AI Routing**: Any participant can share one AI profile (AI name, model, API base). Anyone in the room can then request it with `AIName: prompt`, and only the sharing participant's browser executes the API call and posts the reply.
 - File-based storage: Messages stored as newline-delimited JSON files in `storage/`.
@@ -22,6 +23,7 @@ A lightweight, file-based chat application written in PHP 8 with **client-side e
 
 - The server stores encrypted payloads for message content and images.
 - Screen-share signaling payloads (SDP, ICE) are also encrypted before being relayed through the server.
+- Terminal-share helper payloads (terminal chunks and command messages) are encrypted before relay.
 - AI-share signaling payloads are encrypted before relay; API keys are kept only in the sharer's browser and are never sent to backend storage.
 - Encryption/decryption happens in browser JavaScript.
 - The encryption key is not transmitted to backend endpoints.
@@ -50,6 +52,20 @@ AIName: your prompt here
 Notes:
 - Only the participant who shared that AI profile processes prompts for that AI name.
 - API key is never announced to the room and never stored on the server.
+
+## Terminal Sharing Usage (PowerShell Helper)
+
+1. Join a room with the same encryption key used by other participants.
+2. Click `Download PowerShell Helper`.
+3. Click `Share Terminal` to announce that a helper peer is available.
+4. Run the downloaded `.ps1` helper on the Windows machine that owns the terminal.
+5. Viewers click `Open Terminal Feed` to watch encrypted terminal chunks.
+6. Viewers can send a command from the terminal panel; helper copies it to clipboard, and the terminal owner decides whether to paste/run it with `Ctrl+V`.
+
+Notes:
+- The helper uses PBKDF2 (SHA-256, 200k iterations) + AES-256-GCM, matching browser encryption format.
+- Terminal payloads are relayed as encrypted signals; server stores only ciphertext and metadata.
+- Clipboard bridge means no direct shell execution is forced remotely; terminal owner keeps final control.
 
 ## Runtime Storage
 
