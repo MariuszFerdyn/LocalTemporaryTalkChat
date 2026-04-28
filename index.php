@@ -851,7 +851,18 @@ function fetchSignals(string $room, string $storageDir, string $peerId, int $sin
             const buf = new Uint8Array(12 + cipher.byteLength);
             buf.set(iv, 0);
             buf.set(new Uint8Array(cipher), 12);
-            return btoa(String.fromCharCode(...buf));
+            return bytesToBase64(buf);
+        }
+
+        function bytesToBase64(bytes) {
+            // Chunked conversion avoids "Maximum call stack size exceeded"
+            // that occurs with String.fromCharCode(...bytes) on large payloads (e.g. images).
+            let binary = '';
+            const chunkSize = 0x8000;
+            for (let i = 0; i < bytes.length; i += chunkSize) {
+                binary += String.fromCharCode.apply(null, bytes.subarray(i, i + chunkSize));
+            }
+            return btoa(binary);
         }
 
         async function decryptText(key, b64) {
