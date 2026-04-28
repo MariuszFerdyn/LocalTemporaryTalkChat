@@ -865,6 +865,38 @@ function fetchSignals(string $room, string $storageDir, string $peerId, int $sin
             return btoa(binary);
         }
 
+        function openImageInNewWindow(dataUrl) {
+            // Convert the decrypted data: URL to a Blob URL so browsers reliably
+            // open it in a new tab at the image's native resolution.
+            try {
+                const match = /^data:([^;,]+)(;base64)?,(.*)$/s.exec(dataUrl);
+                if (!match) {
+                    window.open(dataUrl, '_blank', 'noopener');
+                    return;
+                }
+                const mime = match[1] || 'image/png';
+                const isBase64 = !!match[2];
+                const data = match[3];
+                let bytes;
+                if (isBase64) {
+                    const binary = atob(data);
+                    bytes = new Uint8Array(binary.length);
+                    for (let i = 0; i < binary.length; i++) bytes[i] = binary.charCodeAt(i);
+                } else {
+                    bytes = new TextEncoder().encode(decodeURIComponent(data));
+                }
+                const url = URL.createObjectURL(new Blob([bytes], { type: mime }));
+                const win = window.open(url, '_blank', 'noopener');
+                if (!win) {
+                    chatStatus.textContent = 'Popup blocked. Allow popups to view the image.';
+                }
+                // Release the blob URL after the new tab has had time to load it.
+                setTimeout(() => URL.revokeObjectURL(url), 60000);
+            } catch (err) {
+                console.error('openImageInNewWindow failed', err);
+            }
+        }
+
         async function decryptText(key, b64) {
             const buf = Uint8Array.from(atob(b64), c => c.charCodeAt(0));
             const plain = await crypto.subtle.decrypt(
@@ -1300,6 +1332,9 @@ function fetchSignals(string $room, string $storageDir, string $peerId, int $sin
                 img.alt = 'pasted image';
                 try {
                     img.src = await decryptText(state.cryptoKey, message.encryptedImage);
+                    img.style.cursor = 'zoom-in';
+                    img.title = 'Click to open at native resolution';
+                    img.addEventListener('click', () => openImageInNewWindow(img.src));
                 } catch {
                     img.alt = '[could not decrypt image - probably wrong encryption key]';
                 }
