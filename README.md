@@ -6,6 +6,10 @@ A lightweight, file-based chat application written in PHP 8 with **client-side e
 
 - **Secure**: Text and image messages are encrypted locally in your browser using Web Crypto (AES-GCM). Encryption key never leaves your device.
 - **No Sockets**: Chat refreshes automatically every 3 seconds—no WebSockets or long-polling overhead.
+- **Large Encrypted Messages**: Send formatted messages up to **200 KiB plaintext** (client-enforced), with server-side ciphertext size guards.
+- **Rich Text Paste (Word/HTML)**: Pasting formatted content with `Ctrl+V` preserves structure by converting clipboard rich text (for example from Microsoft Word) into markdown before sending.
+- **Code Snippet Sending**: Use `Send Code Snippet` to wrap editor content in fenced code blocks (optional language label).
+- **Encrypted File Attachments**: Attach and send files up to **1 MiB**. Files are encrypted client-side and rendered as downloadable attachments in chat.
 - **Encrypted Images**: Paste images via Ctrl+V; they are encrypted before being sent to server.
 - **Encrypted Screen Sharing**: WebRTC screen-share signaling (SDP offers/answers, ICE candidates) is encrypted with the same room key. Clients with a wrong key cannot negotiate or view a screen share.
 - **Encrypted Terminal Share Bridge**: Participants can share terminal output using a PowerShell helper. Clipboard/output chunks and remote command payloads are AES-GCM encrypted with the room key before relay.
@@ -21,7 +25,7 @@ A lightweight, file-based chat application written in PHP 8 with **client-side e
 
 ## Security Model
 
-- The server stores encrypted payloads for message content and images.
+- The server stores encrypted payloads for message content, images, and file attachments.
 - Screen-share signaling payloads (SDP, ICE) are also encrypted before being relayed through the server.
 - Terminal-share helper payloads (terminal chunks and command messages) are encrypted before relay.
 - AI-share signaling payloads are encrypted before relay; API keys are kept only in the sharer's browser and are never sent to backend storage.
@@ -59,13 +63,13 @@ Notes:
 2. Click `Download PowerShell Helper`.
 3. Click `Share Terminal` to announce that a helper peer is available.
 4. Run the downloaded `.ps1` helper on the Windows machine that owns the terminal.
-5. Viewers click `Open Terminal Feed` to watch encrypted terminal chunks.
-6. Viewers can send a command from the terminal panel; helper copies it to clipboard, and the terminal owner decides whether to paste/run it with `Ctrl+V`.
+5. Viewers watch encrypted terminal chunks in the terminal panel.
+6. Viewers can send a command from the terminal panel; helper receives and executes it, then publishes encrypted output chunks back to the room.
 
 Notes:
 - The helper uses PBKDF2 (SHA-256, 200k iterations) + AES-256-GCM, matching browser encryption format.
 - Terminal payloads are relayed as encrypted signals; server stores only ciphertext and metadata.
-- Clipboard bridge means no direct shell execution is forced remotely; terminal owner keeps final control.
+- Command execution behavior is controlled by the helper runtime on the terminal owner machine.
 
 ## Runtime Storage
 
@@ -79,10 +83,10 @@ Notes:
 2. Run:
 
 ```bash
-php -S 127.0.0.1:8081 index.php
+php -S 0.0.0.0:8081 -t /workspaces/LocalTemporaryTalkChat /workspaces/LocalTemporaryTalkChat/index.php
 ```
 
-3. Open `http://127.0.0.1:8081`.
+3. Open `http://localhost:8081`.
 
 ## GitHub Codespaces Run
 
@@ -91,7 +95,7 @@ php -S 127.0.0.1:8081 index.php
 3. Run in the terminal:
 
 ```bash
-php -S 127.0.0.1:8081 index.php
+php -S 0.0.0.0:8081 -t /workspaces/LocalTemporaryTalkChat /workspaces/LocalTemporaryTalkChat/index.php
 ```
 
 4. Make port 8081 **public** so the forwarded URL is accessible:
@@ -100,14 +104,17 @@ php -S 127.0.0.1:8081 index.php
 5. Open the forwarded URL shown in the Ports tab (e.g. `https://<name>-8081.app.github.dev`).
 6. Start chatting with end-to-end encryption!
 
-Alternatively, use the provided VS Code task: Press `Ctrl+Shift+P` → Run Task → "Start PHP Server" to launch the server.
+Alternatively, use provided VS Code tasks:
+- `Start PHP Server`
+- `Restart PHP Server`
+- `Restart PHP Server Internet`
 
 ## Internet Access With Anonymous Users
 
 If you want internet users to connect:
 
 1. Start the public-bind server task in VS Code:
-	- `Run Task` → `Restart PHP Server (Public)`
+	- `Run Task` → `Restart PHP Server Internet`
 2. Expose port `8081` publicly in your host environment (for Codespaces: Ports tab → port `8081` → visibility `Public`).
 3. Share the forwarded HTTPS URL.
 

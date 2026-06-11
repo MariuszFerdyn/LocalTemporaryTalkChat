@@ -11,7 +11,10 @@ if (PHP_SAPI === 'cli-server') {
 
 const MAX_ROOM_LENGTH = 120;
 const MAX_USER_LENGTH = 40;
-const MAX_TEXT_LENGTH = 8000;           // encrypted text is larger than plaintext
+const MAX_ENCRYPTED_TEXT  = 280000;     // supports ~200 KiB plaintext after AES-GCM + base64 overhead
+const MAX_ENCRYPTED_FILE  = 2100000;    // supports up to 1 MiB file payload (JSON data URL + encryption overhead)
+const MAX_PLAINTEXT_BYTES = 204800;     // 200 KiB plaintext message budget (client-side enforced)
+const MAX_FILE_BYTES      = 1048576;    // 1 MiB file attachment budget (client-side enforced)
 const MAX_ENCRYPTED_IMAGE = 4_000_000; // ~3 MB plaintext image after base64+encryption overhead
 const MAX_SIGNAL_DATA    = 32768;       // enough for SDP offers/answers and ICE candidates
 const MAX_TERMINAL_CHUNK = 24000;       // clipboard/terminal chunks are trimmed to this length
@@ -51,15 +54,19 @@ if ($action !== null) {
             $user = normalizeUser((string)($payload['user'] ?? ''));
             $text = trim((string)($payload['text'] ?? ''));
             $encryptedImage = trim((string)($payload['encryptedImage'] ?? ''));
+            $encryptedFile = trim((string)($payload['encryptedFile'] ?? ''));
 
-            if ($text === '' && $encryptedImage === '') {
-                throw new RuntimeException('Message text or image is required.');
+            if ($text === '' && $encryptedImage === '' && $encryptedFile === '') {
+                throw new RuntimeException('Message text, image or file is required.');
             }
-            if (mb_strlen($text) > MAX_TEXT_LENGTH) {
+            if (mb_strlen($text) > MAX_ENCRYPTED_TEXT) {
                 throw new RuntimeException('Message text is too long.');
             }
             if (mb_strlen($encryptedImage) > MAX_ENCRYPTED_IMAGE) {
                 throw new RuntimeException('Encrypted image payload is too large.');
+            }
+            if (mb_strlen($encryptedFile) > MAX_ENCRYPTED_FILE) {
+                throw new RuntimeException('Encrypted file payload is too large.');
             }
 
             $message = [
@@ -68,6 +75,7 @@ if ($action !== null) {
                 'user' => $user,
                 'text' => $text,
                 'encryptedImage' => $encryptedImage ?: null,
+                'encryptedFile' => $encryptedFile ?: null,
             ];
 
             $message = appendMessage($room, $storageDir, $message);
@@ -494,6 +502,26 @@ function fetchSignals(string $room, string $storageDir, string $peerId, int $sin
             border: 1px solid var(--border);
         }
 
+        .file-attachment {
+            margin-top: 8px;
+            padding: 8px 10px;
+            border: 1px solid var(--border);
+            border-radius: 8px;
+            background: #f6efdf;
+            display: inline-flex;
+            gap: 8px;
+            align-items: center;
+            flex-wrap: wrap;
+            font-size: .9rem;
+        }
+
+        .file-attachment a {
+            color: #155b45;
+            font-weight: 700;
+            text-decoration: underline;
+            word-break: break-all;
+        }
+
         .composer {
             border-top: 1px solid var(--border);
             padding: 14px;
@@ -520,6 +548,33 @@ function fetchSignals(string $room, string $storageDir, string $peerId, int $sin
             gap: 10px;
             align-items: center;
             justify-content: space-between;
+        }
+
+        .composer-send {
+            display: flex;
+            gap: 8px;
+            align-items: center;
+            flex-wrap: wrap;
+        }
+
+        .attachment-row {
+            display: flex;
+            flex-wrap: wrap;
+            gap: 10px;
+            align-items: center;
+        }
+
+        .attachment-row input[type="file"] {
+            max-width: 100%;
+        }
+
+        .attachment-row input[type="text"] {
+            width: min(260px, 100%);
+            padding: 9px;
+            border-radius: 8px;
+            border: 1px solid var(--border);
+            font-family: "Consolas", "Courier New", monospace;
+            font-size: .9rem;
         }
 
         .hint {
@@ -784,6 +839,11 @@ function fetchSignals(string $room, string $storageDir, string $peerId, int $sin
 
             <section class="composer">
                 <textarea id="messageInput" placeholder="Type a message or paste code. Press Ctrl+V to paste an image."></textarea>
+                <div class="attachment-row">
+                    <input id="fileInput" type="file">
+                    <input id="codeLanguageInput" type="text" maxlength="30" placeholder="Code language (optional, e.g. php)">
+                    <span class="hint" id="fileStatus">No file selected.</span>
+                </div>
                 <img id="imagePreview" class="preview" alt="Pasted image preview">
                 <section class="ai-panel" id="aiSharePanel">
                     <input id="aiNameInput" type="text" maxlength="40" placeholder="AI Name (example: CoderBot)">
@@ -812,8 +872,11 @@ function fetchSignals(string $room, string $storageDir, string $peerId, int $sin
                     </div>
                 </section>
                 <div class="composer-actions">
-                    <span class="hint">Auto-refresh every 3s. Ctrl+Enter to send. Markdown supported. Use AIName: prompt to request a shared AI.</span>
-                    <button id="sendBtn" type="button">Send</button>
+                    <span class="hint">Auto-refresh every 3s. Ctrl+Enter sends formatted text. Message limit: 200 KiB. File limit: 1 MiB. Use AIName: prompt to request a shared AI.</span>
+                    <div class="composer-send">
+                        <button id="sendBtn" type="button">Send Formatted</button>
+                        <button id="sendCodeBtn" type="button">Send Code Snippet</button>
+                    </div>
                 </div>
                 <div class="status" id="chatStatus"></div>
             </section>
@@ -881,12 +944,15 @@ function fetchSignals(string $room, string $storageDir, string $peerId, int $sin
             user: 'Guest',
             sinceId: 0,
             pendingImage: '',
+            pendingFile: null,
             pollTimer: null,
             cryptoKey: null,
             channelSecret: '',
         };
 
         const TERMINAL_MAX_CHUNK = <?php echo MAX_TERMINAL_CHUNK; ?>;
+        const MAX_PLAINTEXT_BYTES = <?php echo MAX_PLAINTEXT_BYTES; ?>;
+        const MAX_FILE_BYTES = <?php echo MAX_FILE_BYTES; ?>;
 
         const aiState = {
             providers: {},
@@ -940,7 +1006,11 @@ function fetchSignals(string $room, string $storageDir, string $peerId, int $sin
         const messagesEl = document.getElementById('messages');
         const refreshBtn = document.getElementById('refreshBtn');
         const sendBtn = document.getElementById('sendBtn');
+        const sendCodeBtn = document.getElementById('sendCodeBtn');
         const messageInput = document.getElementById('messageInput');
+        const fileInput = document.getElementById('fileInput');
+        const fileStatus = document.getElementById('fileStatus');
+        const codeLanguageInput = document.getElementById('codeLanguageInput');
         const chatStatus = document.getElementById('chatStatus');
         const imagePreview = document.getElementById('imagePreview');
         const shareAIBtn = document.getElementById('shareAIBtn');
@@ -993,6 +1063,19 @@ function fetchSignals(string $room, string $storageDir, string $peerId, int $sin
             .replaceAll('"', '&quot;')
             .replaceAll("'", '&#39;');
 
+        const formatBytes = (bytes) => {
+            if (!Number.isFinite(bytes) || bytes <= 0) {
+                return '0 B';
+            }
+            if (bytes >= 1024 * 1024) {
+                return `${(bytes / (1024 * 1024)).toFixed(2)} MiB`;
+            }
+            if (bytes >= 1024) {
+                return `${(bytes / 1024).toFixed(1)} KiB`;
+            }
+            return `${bytes} B`;
+        };
+
         const renderMarkdown = (raw) => {
             let text = escapeHtml(raw).replace(/\r\n/g, '\n');
 
@@ -1022,6 +1105,92 @@ function fetchSignals(string $room, string $storageDir, string $peerId, int $sin
             let html = blocks.join('');
             html = html.replace(/@@FENCED_(\d+)@@/g, (_, idx) => fenced[Number(idx)] || '');
             return html || '<p></p>';
+        };
+
+        const insertIntoTextarea = (textarea, text) => {
+            const start = Number(textarea.selectionStart || 0);
+            const end = Number(textarea.selectionEnd || 0);
+            const before = textarea.value.slice(0, start);
+            const after = textarea.value.slice(end);
+            textarea.value = before + text + after;
+            const next = start + text.length;
+            textarea.selectionStart = next;
+            textarea.selectionEnd = next;
+        };
+
+        const htmlToMarkdown = (html) => {
+            const parser = new DOMParser();
+            const doc = parser.parseFromString(html, 'text/html');
+
+            const applyInlineStyle = (el, text) => {
+                const style = (el.getAttribute('style') || '').toLowerCase();
+                let out = text;
+                if (/font-weight\s*:\s*(bold|[6-9]00)/.test(style) && out.trim()) {
+                    out = `**${out}**`;
+                }
+                if (/font-style\s*:\s*italic/.test(style) && out.trim()) {
+                    out = `*${out}*`;
+                }
+                return out;
+            };
+
+            const walk = (node) => {
+                if (node.nodeType === Node.TEXT_NODE) {
+                    return (node.textContent || '').replace(/\u00a0/g, ' ');
+                }
+                if (node.nodeType !== Node.ELEMENT_NODE) {
+                    return '';
+                }
+
+                const el = node;
+                const tag = el.tagName.toLowerCase();
+                const children = Array.from(el.childNodes).map(walk).join('');
+
+                if (tag === 'br') return '\n';
+                if (tag === 'strong' || tag === 'b') return children.trim() ? `**${children}**` : children;
+                if (tag === 'em' || tag === 'i') return children.trim() ? `*${children}*` : children;
+                if (tag === 'code') return children.trim() ? `\`${children.replace(/\n+/g, ' ')}\`` : children;
+                if (tag === 'pre') {
+                    const codeText = (el.textContent || '').replace(/\r\n/g, '\n').replace(/\r/g, '\n').trimEnd();
+                    return codeText ? `\n\`\`\`\n${codeText}\n\`\`\`\n` : '';
+                }
+                if (tag === 'a') {
+                    const href = (el.getAttribute('href') || '').trim();
+                    const label = children.trim() || href;
+                    return href ? `[${label}](${href})` : label;
+                }
+                if (tag === 'li') {
+                    return children.replace(/\n{2,}/g, '\n').trim();
+                }
+                if (tag === 'ul') {
+                    const items = Array.from(el.children)
+                        .filter((c) => c.tagName && c.tagName.toLowerCase() === 'li')
+                        .map((li) => `- ${walk(li)}`)
+                        .join('\n');
+                    return items ? `\n${items}\n` : '';
+                }
+                if (tag === 'ol') {
+                    let idx = 1;
+                    const items = Array.from(el.children)
+                        .filter((c) => c.tagName && c.tagName.toLowerCase() === 'li')
+                        .map((li) => `${idx++}. ${walk(li)}`)
+                        .join('\n');
+                    return items ? `\n${items}\n` : '';
+                }
+                if (tag === 'p' || tag === 'div' || tag === 'section' || tag === 'article' || tag === 'h1' || tag === 'h2' || tag === 'h3' || tag === 'h4' || tag === 'h5' || tag === 'h6') {
+                    const paragraph = children.trim();
+                    return paragraph ? `${paragraph}\n\n` : '';
+                }
+
+                return applyInlineStyle(el, children);
+            };
+
+            const converted = Array.from(doc.body.childNodes).map(walk).join('');
+            return converted
+                .replace(/\r\n/g, '\n')
+                .replace(/\r/g, '\n')
+                .replace(/\n{3,}/g, '\n\n')
+                .trim();
         };
 
         const normalizeAiName = (name) => name.trim().toLowerCase();
@@ -1273,6 +1442,31 @@ function fetchSignals(string $room, string $storageDir, string $peerId, int $sin
             }
         };
 
+        const parseDecryptedFilePayload = (raw) => {
+            let payload;
+            try {
+                payload = JSON.parse(raw);
+            } catch {
+                throw new Error('Invalid file metadata payload.');
+            }
+            if (!payload || typeof payload !== 'object') {
+                throw new Error('Invalid file metadata object.');
+            }
+            const name = typeof payload.name === 'string' ? payload.name.trim() : '';
+            const mime = typeof payload.type === 'string' ? payload.type.trim() : 'application/octet-stream';
+            const size = Number(payload.size || 0);
+            const data = typeof payload.data === 'string' ? payload.data : '';
+            if (!name || !data.startsWith('data:')) {
+                throw new Error('File payload is missing required fields.');
+            }
+            return {
+                name: name.slice(0, 200),
+                type: mime || 'application/octet-stream',
+                size: Number.isFinite(size) && size >= 0 ? size : 0,
+                data,
+            };
+        };
+
         const appendMessage = async (message) => {
             const item = document.createElement('article');
             item.className = 'msg';
@@ -1306,6 +1500,28 @@ function fetchSignals(string $room, string $storageDir, string $peerId, int $sin
                 item.appendChild(img);
             }
 
+            if (message.encryptedFile) {
+                const fileWrap = document.createElement('div');
+                fileWrap.className = 'file-attachment';
+                try {
+                    const payload = parseDecryptedFilePayload(await decryptText(state.cryptoKey, message.encryptedFile));
+                    const label = document.createElement('span');
+                    label.textContent = 'File:';
+                    const link = document.createElement('a');
+                    link.href = payload.data;
+                    link.download = payload.name;
+                    link.textContent = payload.name;
+                    const size = document.createElement('span');
+                    size.className = 'hint';
+                    size.textContent = `${formatBytes(payload.size)}${payload.type ? ` • ${payload.type}` : ''}`;
+                    fileWrap.append(label, link, size);
+                } catch {
+                    fileWrap.textContent = '[could not decrypt file - probably wrong encryption key]';
+                    fileWrap.style.color = '#8e2f2f';
+                }
+                item.appendChild(fileWrap);
+            }
+
             messagesEl.appendChild(item);
             messagesEl.scrollTop = messagesEl.scrollHeight;
         };
@@ -1331,43 +1547,80 @@ function fetchSignals(string $room, string $storageDir, string $peerId, int $sin
             }
         };
 
-        const sendMessage = async () => {
+        const sendMessage = async (options = {}) => {
             if (!state.room) {
                 return;
             }
 
-            const rawText = messageInput.value;
+            const textOverride = typeof options.textOverride === 'string' ? options.textOverride : null;
+            const rawText = textOverride ?? messageInput.value;
             const rawImage = state.pendingImage;
-            if (!rawText.trim() && !rawImage) {
-                chatStatus.textContent = 'Type a message or paste an image first.';
+            const rawFile = state.pendingFile;
+            const textToSend = rawText.replace(/\r\n/g, '\n').replace(/\r/g, '\n');
+            const hasText = textToSend.trim().length > 0;
+
+            if (!hasText && !rawImage && !rawFile) {
+                chatStatus.textContent = 'Type a message, paste an image, or attach a file first.';
+                return;
+            }
+
+            const textBytes = hasText ? new TextEncoder().encode(textToSend).length : 0;
+            if (textBytes > MAX_PLAINTEXT_BYTES) {
+                chatStatus.textContent = `Message too large (${formatBytes(textBytes)}). Maximum is ${formatBytes(MAX_PLAINTEXT_BYTES)}.`;
+                return;
+            }
+
+            if (rawFile && Number(rawFile.size || 0) > MAX_FILE_BYTES) {
+                chatStatus.textContent = `File is too large (${formatBytes(Number(rawFile.size || 0))}). Maximum is ${formatBytes(MAX_FILE_BYTES)}.`;
                 return;
             }
 
             sendBtn.disabled = true;
+            sendCodeBtn.disabled = true;
             try {
-                const encText  = rawText.trim() ? await encryptText(state.cryptoKey, rawText) : '';
-                const encImage = rawImage       ? await encryptText(state.cryptoKey, rawImage) : '';
+                const encText  = hasText ? await encryptText(state.cryptoKey, textToSend) : '';
+                const encImage = rawImage    ? await encryptText(state.cryptoKey, rawImage) : '';
+                const encFile  = rawFile ? await encryptText(state.cryptoKey, JSON.stringify(rawFile)) : '';
 
                 const data = await callApi('send', {
                     room: state.room,
                     user: state.user,
                     text: encText,
                     encryptedImage: encImage,
+                    encryptedFile: encFile,
                 });
 
                 await appendMessage(data.message);
                 state.sinceId = Math.max(state.sinceId, Number(data.message.id || 0));
                 messageInput.value = '';
                 state.pendingImage = '';
+                state.pendingFile = null;
                 imagePreview.src = '';
                 imagePreview.classList.remove('visible');
+                fileInput.value = '';
+                fileStatus.textContent = 'No file selected.';
                 chatStatus.textContent = '';
             } catch (err) {
                 chatStatus.textContent = err.message;
             } finally {
                 sendBtn.disabled = false;
+                sendCodeBtn.disabled = false;
                 messageInput.focus();
             }
+        };
+
+        const sendCodeSnippet = async () => {
+            const code = messageInput.value;
+            if (!code.trim()) {
+                chatStatus.textContent = 'Type code first, then use Send Code Snippet.';
+                return;
+            }
+            const language = codeLanguageInput.value.trim().replace(/[^A-Za-z0-9_+-]/g, '').slice(0, 30);
+            const normalized = code.replace(/\r\n/g, '\n').replace(/\r/g, '\n').trimEnd();
+            const fenced = language
+                ? `\`\`\`${language}\n${normalized}\n\`\`\``
+                : `\`\`\`\n${normalized}\n\`\`\``;
+            await sendMessage({ textOverride: fenced });
         };
 
         joinBtn.addEventListener('click', async () => {
@@ -1394,6 +1647,8 @@ function fetchSignals(string $room, string $storageDir, string $peerId, int $sin
             state.user = user;
             state.channelSecret = channelKey || room;
             state.sinceId = 0;
+            state.pendingImage = '';
+            state.pendingFile = null;
             aiState.providers = {};
             aiState.localShares = {};
             aiState.processedMessageIds.clear();
@@ -1409,6 +1664,11 @@ function fetchSignals(string $room, string $storageDir, string $peerId, int $sin
             chatView.classList.add('visible');
 
             messagesEl.innerHTML = '';
+            imagePreview.src = '';
+            imagePreview.classList.remove('visible');
+            fileInput.value = '';
+            fileStatus.textContent = 'No file selected.';
+            codeLanguageInput.value = '';
             await refreshMessages();
 
             clearInterval(state.pollTimer);
@@ -1439,12 +1699,50 @@ function fetchSignals(string $room, string $storageDir, string $peerId, int $sin
 
         refreshBtn.addEventListener('click', refreshMessages);
         sendBtn.addEventListener('click', sendMessage);
+        sendCodeBtn.addEventListener('click', sendCodeSnippet);
 
         messageInput.addEventListener('keydown', (e) => {
             if (e.key === 'Enter' && e.ctrlKey) {
                 e.preventDefault();
                 sendMessage();
             }
+        });
+
+        fileInput.addEventListener('change', () => {
+            const file = fileInput.files && fileInput.files[0] ? fileInput.files[0] : null;
+            if (!file) {
+                state.pendingFile = null;
+                fileStatus.textContent = 'No file selected.';
+                return;
+            }
+            if (file.size > MAX_FILE_BYTES) {
+                fileInput.value = '';
+                state.pendingFile = null;
+                fileStatus.textContent = `File too large (${formatBytes(file.size)}). Max is ${formatBytes(MAX_FILE_BYTES)}.`;
+                return;
+            }
+
+            const reader = new FileReader();
+            reader.onload = () => {
+                const dataUrl = typeof reader.result === 'string' ? reader.result : '';
+                if (!dataUrl.startsWith('data:')) {
+                    state.pendingFile = null;
+                    fileStatus.textContent = 'Unable to read attached file.';
+                    return;
+                }
+                state.pendingFile = {
+                    name: (file.name || 'file').slice(0, 200),
+                    type: file.type || 'application/octet-stream',
+                    size: file.size,
+                    data: dataUrl,
+                };
+                fileStatus.textContent = `Ready: ${state.pendingFile.name} (${formatBytes(file.size)})`;
+            };
+            reader.onerror = () => {
+                state.pendingFile = null;
+                fileStatus.textContent = 'File read failed.';
+            };
+            reader.readAsDataURL(file);
         });
 
         messageInput.addEventListener('paste', (event) => {
@@ -1473,6 +1771,20 @@ function fetchSignals(string $room, string $storageDir, string $peerId, int $sin
                     return;
                 }
             }
+
+            const html = event.clipboardData?.getData('text/html') || '';
+            if (!html.trim()) {
+                return;
+            }
+
+            const markdown = htmlToMarkdown(html);
+            if (!markdown) {
+                return;
+            }
+
+            event.preventDefault();
+            insertIntoTextarea(messageInput, markdown);
+            chatStatus.textContent = 'Rich text pasted and converted to markdown formatting.';
         });
 
         shareAIBtn.addEventListener('click', async () => {
